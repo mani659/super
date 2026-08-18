@@ -1,0 +1,1367 @@
+
+--- config.py ---
+# config.py
+MAGIC_INVERSION = 9995551
+MAGIC_CONTINUATION = 9995552
+MAGIC_GRID = 9995553
+
+SYMBOLS = ['XAUUSDm', 'BTCUSDm', 'ETHUSDm', 'USTECm', 'USOILm', 'EURUSDm', 'GBPUSDm', 'USDJPYm', 'EURGBPm', 'AUDNZDm']
+TERMINAL_PATH = r"C:\Program Files\MetaTrader 5 EXNESS - Copy (2)\terminal64.exe"
+
+ATR_PERIOD = 14
+ATR_MULT_SL = 2.5
+REWARD_MULTIPLIER = 2.0
+RISK_PERCENT = 0.01
+--- logger_config.py ---
+# logger_config.py
+import logging
+from datetime import datetime
+
+def setup_logging():
+    log_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Forcefully clear any implicit handlers added by early module imports
+    if logger.handlers:
+        logger.handlers.clear()
+        
+    import sys
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(log_formatter)
+    logger.addHandler(console_handler)
+
+    file_handler = logging.FileHandler("cab_watcher_production.log", encoding="utf-8")
+    file_handler.setFormatter(log_formatter)
+    logger.addHandler(file_handler)
+        
+    return logger
+
+def update_heartbeat(logger):
+    try:
+        with open("cab_watcher_heartbeat.txt", "w") as f:
+            f.write(f"ONLINE | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | TRI-VECTOR REGIME ENGINE")
+    except Exception as e:
+        logger.error(f"Heartbeat write error: {e}")
+--- main.py ---
+import MetaTrader5 as mt5
+import time
+import config
+from logger_config import setup_logging, update_heartbeat
+from metrics import harvest_closed_trades, track_active_excursions, track_h1_structure
+from strat_inversion import execute_inversion_entries, manage_inversion_positions
+from strat_continuation import execute_continuation_entries, manage_continuation_positions
+from strat_grid import execute_grid_entries, manage_grid_positions
+
+def main():
+    logger = setup_logging()
+    
+    if not mt5.initialize(path=config.TERMINAL_PATH):
+        logger.error(f"MT5 Init Failed. Error Code: {mt5.last_error()} | Path: {config.TERMINAL_PATH}")
+        return
+        
+    logger.info("ONLINE | Multi-Regime Architecture Active | Inversion (9995551), Continuation (9995552), Grid (9995553)")
+    
+    try:
+        while True:
+            update_heartbeat(logger)
+            
+            # 1. Inversion Vector (ADX > 60, Parabolic Exhaustion / Mean Reversion)
+            execute_inversion_entries()
+            manage_inversion_positions()
+            
+            # 2. Continuation Vector (ADX 30-60, Impulsive Trend Pullback Continuation)
+            execute_continuation_entries()
+            manage_continuation_positions()
+            
+            # 3. Range Extraction Grid Vector (ADX < 30, Mean-Reversion Basket)
+            execute_grid_entries()
+            manage_grid_positions()
+            
+            # 4. Event-driven background excursion & structural monitors
+            track_active_excursions(config.MAGIC_INVERSION)
+            track_active_excursions(config.MAGIC_CONTINUATION)
+            track_active_excursions(config.MAGIC_GRID)
+            
+            track_h1_structure(config.MAGIC_INVERSION)
+            track_h1_structure(config.MAGIC_CONTINUATION)
+            track_h1_structure(config.MAGIC_GRID)
+            
+            # 5. Post-trade analytics harvest
+            harvest_closed_trades(config.MAGIC_INVERSION)
+            harvest_closed_trades(config.MAGIC_CONTINUATION)
+            harvest_closed_trades(config.MAGIC_GRID)
+            
+            time.sleep(60)
+    except KeyboardInterrupt:
+        logger.info("CAB REGIME BOT OFFLINE - Shutting down.")
+        mt5.shutdown()
+
+if __name__ == "__main__":
+    main()
+--- metrics.py ---
+import MetaTrader5 as mt5
+from datetime import timedelta
+import logging
+import pandas as pd
+import config
+import time
+import json
+import os
+
+harvested_tickets = set()
+active_excursions = {}  
+trade_context = {}      
+flip_ledger = {}        
+h1_breach_tracker = {}  
+
+CONTEXT_FILE = "trade_context.json"
+last_harvest_time = 0
+
+def load_trade_context():
+    """Loads trade risk context from disk to survive script restarts."""
+    global trade_context
+    if os.path.exists(CONTEXT_FILE):
+        try:
+            with open(CONTEXT_FILE, "r") as f:
+                data = json.load(f)
+                trade_context = {int(k): v for k, v in data.items()}
+        except Exception as e:
+            logging.error(f"Failed to load trade_context: {e}")
+
+def save_trade_context():
+    """Saves trade risk context to disk."""
+    try:
+        with open(CONTEXT_FILE, "w") as f:
+            json.dump({str(k): v for k, v in trade_context.items()}, f)
+    except Exception as e:
+        logging.error(f"Failed to save trade_context: {e}")
+
+# Load context memory on startup
+load_trade_context()
+
+def register_trade_context(ticket, risk_amount, spread, slippage, exhaustion_state, volume, smc_confluence):
+    """Stores entry diagnostics persistently."""
+    trade_context[ticket] = {
+        'risk_amount': risk_amount,
+        'spread': spread,
+        'slippage': slippage,
+        'exhaustion_state': exhaustion_state,
+        'volume': int(volume),
+        'smc_confluence': smc_confluence
+    }
+    save_trade_context()
+
+def log_structural_flip(ticket, reason="STRUCTURAL_FLIP"):
+    """Flags a ticket as being closed by an early structural invalidation."""
+    flip_ledger[ticket] = reason
+
+def track_h1_structure(magic_number):
+    """Passive H1 background monitoring for decay hypothesis."""
+    positions = mt5.positions_get()
+    if not positions: return
+    
+    for pos in positions:
+        if pos.magic == magic_number and pos.ticket not in h1_breach_tracker:
+            rates = mt5.copy_rates_from_pos(pos.symbol, mt5.TIMEFRAME_H1, 1, 4)
+            if rates is None or len(rates) < 4: continue
+            
+            df = pd.DataFrame(rates)
+            tick = mt5.symbol_info_tick(pos.symbol)
+            if tick is None: continue
+            
+            is_buy = pos.type == mt5.ORDER_TYPE_BUY
+            breached = tick.bid < df['low'].min() if is_buy else tick.ask > df['high'].max()
+            
+            if breached:
+                h1_breach_tracker[pos.ticket] = tick.time 
+
+def track_active_excursions(magic_number):
+    """Monitors live floating MFE/MAE excursions."""
+    positions = mt5.positions_get()
+    if positions is None: return
+
+    for pos in positions:
+        if pos.magic == magic_number:
+            ticket = pos.ticket
+            current_profit = pos.profit
+            current_time = pos.time_update 
+            
+            if ticket not in active_excursions:
+                active_excursions[ticket] = {'mfe': current_profit, 'mae': current_profit, 'mfe_time': current_time, 'mae_time': current_time}
+            else:
+                if current_profit > active_excursions[ticket]['mfe']:
+                    active_excursions[ticket]['mfe'] = current_profit
+                    active_excursions[ticket]['mfe_time'] = current_time
+                if current_profit < active_excursions[ticket]['mae']:
+                    active_excursions[ticket]['mae'] = current_profit
+                    active_excursions[ticket]['mae_time'] = current_time
+
+def harvest_closed_trades(magic_number):
+    global harvested_tickets, active_excursions, trade_context, flip_ledger, h1_breach_tracker, last_harvest_time
+    logger = logging.getLogger()
+    
+    terminal_info = mt5.terminal_info()
+    if not terminal_info: return
+    
+    tick_ref = mt5.symbol_info_tick(config.SYMBOLS[0])
+    if tick_ref is None: return
+    current_broker_time = tick_ref.time + 86400
+    start_time = int(time.time() - 172800) if last_harvest_time == 0 else last_harvest_time
+    
+    history_deals = mt5.history_deals_get(start_time, current_broker_time) 
+    if not history_deals: return
+    
+    for deal in history_deals:
+        if deal.magic == magic_number and deal.entry == mt5.DEAL_ENTRY_OUT:
+            ticket = deal.position_id
+            if ticket in harvested_tickets: continue
+            
+            history_orders = mt5.history_orders_get(position=ticket)
+            if not history_orders: continue
+            
+            entry_order = next((o for o in history_orders if o.type in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL)), None)
+            if not entry_order: continue
+            
+            profit = deal.profit
+            duration = deal.time - entry_order.time_setup
+            dur_str = str(timedelta(seconds=duration))
+            
+            exit_reason = flip_ledger.pop(ticket, "HARD_STOP" if profit <= 0 else "TRAILING_STOP")
+            
+            excursion_data = active_excursions.pop(ticket, {'mfe': profit, 'mae': profit})
+            mfe = max(excursion_data['mfe'], profit)
+            mae = min(excursion_data['mae'], profit)
+            
+            ctx = trade_context.pop(ticket, {})
+            risk_amount = ctx.get('risk_amount', None)
+            
+            mfe_capture = (profit / mfe * 100) if mfe > 0 and profit > 0 else 0.0
+            r_multiple_val = profit / risk_amount if (risk_amount and risk_amount > 0) else 0.0
+            
+            r_saved = round(r_multiple_val - (-1.0), 2) if "FLIP" in exit_reason or "H1_STRUCT" in exit_reason else "N/A"
+            
+            decay_time = "N/A"
+            h1_breach_time = h1_breach_tracker.pop(ticket, None)
+            if h1_breach_time:
+                decay_duration = deal.time - h1_breach_time
+                if decay_duration > 0:
+                    decay_time = str(timedelta(seconds=decay_duration))
+            
+            logger.info(
+                f"[METRICS] HARVESTED | ID {ticket} | {deal.symbol} | Profit: ${profit:.2f} | R: {r_multiple_val:.2f}R | "
+                f"Exit: {exit_reason} | R-Saved: {r_saved} | MFE: ${mfe:.2f} ({mfe_capture:.1f}%) | "
+                f"MAE: ${mae:.2f} | H1-Decay: {decay_time} | Dur: {dur_str}"
+            )
+            harvested_tickets.add(ticket)
+            save_trade_context()
+            
+    last_harvest_time = tick_ref.time
+--- shared_utils.py ---
+import MetaTrader5 as mt5
+import pandas as pd
+import numpy as np
+import logging
+import math
+from datetime import datetime
+import config
+
+logger = logging.getLogger("CAB_SHARED")
+
+def _get_filling_mode(symbol: str) -> int:
+    """Standard MT5 FOK/IOC/RETURN filling mode detection."""
+    sym_info = mt5.symbol_info(symbol)
+    if sym_info is None: 
+        return mt5.ORDER_FILLING_IOC
+    
+    if sym_info.filling_mode & 1: 
+        return mt5.ORDER_FILLING_FOK
+    elif sym_info.filling_mode & 2: 
+        return mt5.ORDER_FILLING_IOC
+    else:
+        return mt5.ORDER_FILLING_RETURN
+
+def get_atr(symbol: str, timeframe: int, period: int = 14) -> float:
+    """
+    ATR calculation returning a float.
+    Guards against None and NaN values.
+    """
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, period + 1)
+    if rates is None or len(rates) < period + 1: 
+        return 0.0
+    
+    df = pd.DataFrame(rates)
+    df['prev_close'] = df['close'].shift(1)
+    df['tr'] = np.maximum(
+        df['high'] - df['low'],
+        np.maximum(
+            (df['high'] - df['prev_close']).abs(),
+            (df['low'] - df['prev_close']).abs()
+        )
+    )
+    atr_val = df['tr'].rolling(window=period).mean().iloc[-1]
+    if atr_val is None or (isinstance(atr_val, float) and math.isnan(atr_val)):
+        return 0.0
+    return float(atr_val)
+
+def get_adx_directional(symbol: str, timeframe: int, period: int = 14) -> tuple:
+    """
+    Calculate ADX, +DI, and -DI over the requested timeframe.
+    Returns tuple: (adx_val, plus_di, minus_di).
+    Guards against missing data with clean (0.0, 0.0, 0.0) fallback.
+    """
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, period * 3)
+    if rates is None or len(rates) < period * 2:
+        return (0.0, 0.0, 0.0)
+    
+    df = pd.DataFrame(rates)
+    df['up_move'] = df['high'] - df['high'].shift(1)
+    df['down_move'] = df['low'].shift(1) - df['low']
+    
+    df['+dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0.0)
+    df['-dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0.0)
+    
+    df['prev_close'] = df['close'].shift(1)
+    df['tr'] = np.maximum(
+        df['high'] - df['low'],
+        np.maximum(
+            (df['high'] - df['prev_close']).abs(),
+            (df['low'] - df['prev_close']).abs()
+        )
+    )
+    
+    tr_smooth = df['tr'].rolling(window=period).sum()
+    plus_dm_smooth = df['+dm'].rolling(window=period).sum()
+    minus_dm_smooth = df['-dm'].rolling(window=period).sum()
+    
+    # Avoid zero division
+    safe_tr = tr_smooth.replace(0, np.nan)
+    plus_di_series = 100 * (plus_dm_smooth / safe_tr)
+    minus_di_series = 100 * (minus_dm_smooth / safe_tr)
+    
+    di_sum = plus_di_series + minus_di_series
+    safe_di_sum = di_sum.replace(0, np.nan)
+    dx_series = 100 * ((plus_di_series - minus_di_series).abs() / safe_di_sum)
+    adx_series = dx_series.rolling(window=period).mean()
+    
+    adx_val = adx_series.iloc[-1]
+    plus_di = plus_di_series.iloc[-1]
+    minus_di = minus_di_series.iloc[-1]
+    
+    adx_clean = 0.0 if (pd.isna(adx_val) or math.isnan(adx_val)) else float(adx_val)
+    plus_di_clean = 0.0 if (pd.isna(plus_di) or math.isnan(plus_di)) else float(plus_di)
+    minus_di_clean = 0.0 if (pd.isna(minus_di) or math.isnan(minus_di)) else float(minus_di)
+    
+    return (adx_clean, plus_di_clean, minus_di_clean)
+
+def calculate_dynamic_lot(symbol: str, sl_dist: float, risk_pct: float = 0.01) -> float:
+    """
+    Calculates lot size using (risk_amount / (sl_points * tick_value)).
+    Clamps to volume_min, volume_max, and rounds to volume_step.
+    """
+    account_info = mt5.account_info()
+    sym_info = mt5.symbol_info(symbol)
+    if not account_info or not sym_info: 
+        return 0.01
+
+    risk_amount = account_info.balance * risk_pct
+    try:
+        sl_points = sl_dist / sym_info.point
+        tick_value = sym_info.trade_tick_value
+        tick_size = sym_info.trade_tick_size
+        
+        if tick_value <= 0 or sl_points <= 0 or tick_size <= 0: 
+            return sym_info.volume_min
+            
+        point_value = tick_value / (tick_size / sym_info.point)
+        
+        raw_lot = risk_amount / (sl_points * point_value)
+        step = sym_info.volume_step if sym_info.volume_step > 0 else 0.01
+        lot_size = round(raw_lot / step) * step
+        lot_size = max(sym_info.volume_min, min(lot_size, sym_info.volume_max))
+        
+        # Format decimals based on volume step
+        if step == 0.01:
+            return round(lot_size, 2)
+        elif step == 0.1:
+            return round(lot_size, 1)
+        else:
+            return round(lot_size, 2)
+    except Exception as e:
+        logger.error(f"Lot sizing error on {symbol}: {e}")
+        return sym_info.volume_min if sym_info else 0.01
+
+def is_valid_session(symbol: str = None) -> bool:
+    """
+    Returns True only if current broker server hour is between 12 and 22
+    (London/NY overlap & NY session). Returns False otherwise.
+    """
+    hour = None
+    if symbol:
+        tick = mt5.symbol_info_tick(symbol)
+        if tick:
+            hour = datetime.utcfromtimestamp(tick.time).hour
+    
+    if hour is None:
+        if config.SYMBOLS:
+            tick = mt5.symbol_info_tick(config.SYMBOLS[0])
+            if tick:
+                hour = datetime.utcfromtimestamp(tick.time).hour
+    
+    if hour is None:
+        hour = datetime.utcnow().hour
+        
+    return 12 <= hour < 22
+
+def check_exhaustion_filter(symbol: str, is_buy: bool = True) -> bool:
+    """
+    Evaluates closed M15 candle wick rejection (>50% of bar size).
+    """
+    rates_m15 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 1, 1)
+    if rates_m15 is None or len(rates_m15) == 0: 
+        return False
+    
+    for r in rates_m15:
+        bar_size = r['high'] - r['low']
+        if bar_size <= 0: 
+            continue
+        if is_buy:
+            upper_wick = r['high'] - max(r['open'], r['close'])
+            if (upper_wick / bar_size) > 0.5: 
+                return True
+        else:
+            lower_wick = min(r['open'], r['close']) - r['low']
+            if (lower_wick / bar_size) > 0.5: 
+                return True
+    return False
+
+def check_smc_confluence(symbol: str, rates = None) -> str:
+    """SMC Confluence check returning FVG_ALIGNED."""
+    return "FVG_ALIGNED"
+
+def check_h4_inversion(symbol: str) -> str:
+    """
+    Detects 2-bar H4 Inversion setup.
+    Returns 'BULLISH', 'BEARISH', or None.
+    """
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H4, 0, 3)
+    if rates is None or len(rates) < 3: 
+        return None
+    c1, c2 = rates[-2], rates[-3]
+    if (c1['close'] > c1['open']) and (c2['close'] < c2['open']) and (c1['close'] > c2['high']): 
+        return "BULLISH"
+    if (c1['close'] < c1['open']) and (c2['close'] > c2['open']) and (c1['close'] < c2['low']): 
+        return "BEARISH"
+    return None
+
+def _close_position(pos, reason: str, magic_number: int) -> bool:
+    """
+    Force-closes MT5 positions with error handling and logging.
+    """
+    tick = mt5.symbol_info_tick(pos.symbol)
+    if tick is None: 
+        return False
+    
+    exit_price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
+    order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+    
+    req = {
+        "action": mt5.TRADE_ACTION_DEAL, 
+        "position": pos.ticket, 
+        "symbol": pos.symbol,
+        "volume": pos.volume, 
+        "type": order_type,
+        "price": exit_price, 
+        "deviation": 20, 
+        "magic": magic_number,
+        "comment": str(reason)[:31], 
+        "type_time": mt5.ORDER_TIME_GTC, 
+        "type_filling": _get_filling_mode(pos.symbol)
+    }
+    res = mt5.order_send(req)
+    if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+        logging.getLogger().info(f"[{reason}] KILLED #{pos.ticket} [{pos.symbol}] at {exit_price}")
+        return True
+    else:
+        ret = res.retcode if res else "NoResponse"
+        logging.getLogger().error(f"Failed to close #{pos.ticket} [{pos.symbol}]: Retcode {ret}")
+    return False
+
+--- strat_continuation.py ---
+import MetaTrader5 as mt5
+import pandas as pd
+import logging
+import math
+import config
+from metrics import register_trade_context, log_structural_flip
+from shared_utils import (
+    _get_filling_mode,
+    get_atr,
+    get_adx_directional,
+    calculate_dynamic_lot,
+    is_valid_session,
+    check_h4_inversion,
+    check_exhaustion_filter,
+    check_smc_confluence,
+    _close_position
+)
+
+# Magic Number hardcoded for the Continuation Vector (ADX 30 to 60)
+MAGIC_CONTINUATION = 9995552
+RISK_PERCENT = 0.01  # 1% Account Risk per trade
+
+last_h4_bar = {sym: None for sym in config.SYMBOLS}
+logger = logging.getLogger("STRAT_CONTINUATION")
+
+def manage_continuation_positions():
+    """
+    Trade management for Trend Continuation positions (Magic: 9995552).
+    - Reaper (-0.5R H1 momentum bailout)
+    - Protector (Lock BE + buffer at 1.0R)
+    - NO HARVESTER (Do not cap at 2.0R — let trend run)
+    - Elastic Trailing (1.0R trail between 1R-2R, 0.5R trail > 2R)
+    - H1 Structural Invalidation for losing trades
+    """
+    positions = mt5.positions_get()
+    if not positions:
+        return
+    
+    for pos in positions:
+        if pos.magic != MAGIC_CONTINUATION:
+            continue
+        sym_info = mt5.symbol_info(pos.symbol)
+        if not sym_info:
+            continue
+        
+        orders = mt5.history_orders_get(position=pos.ticket)
+        if not orders:
+            continue
+        entry_order = next((o for o in orders if o.type in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL)), None)
+        if not entry_order or entry_order.sl == 0:
+            continue
+        
+        initial_risk_price = abs(pos.price_open - entry_order.sl)
+        if initial_risk_price <= 0:
+            continue
+        
+        is_buy = pos.type == mt5.ORDER_TYPE_BUY
+        profit_price_dist = (pos.price_current - pos.price_open) if is_buy else (pos.price_open - pos.price_current)
+        current_r = profit_price_dist / initial_risk_price if initial_risk_price > 0 else 0.0
+        
+        five_dollars_target = 5.0
+        tick_val = sym_info.trade_tick_value
+        tick_sz = sym_info.trade_tick_size
+        if tick_val > 0 and pos.volume > 0 and tick_sz > 0:
+            price_for_five = (five_dollars_target / (tick_val * pos.volume)) * tick_sz
+        else:
+            price_for_five = sym_info.point * 50
+            
+        m15_atr_raw = get_atr(pos.symbol, mt5.TIMEFRAME_M15, 14)
+        m15_atr = (price_for_five * 2) if m15_atr_raw <= 0 or math.isnan(m15_atr_raw) else m15_atr_raw
+        
+        buffer_price = max(price_for_five, m15_atr * 0.1)
+        be_plus_buffer = pos.price_open + buffer_price if is_buy else pos.price_open - buffer_price
+        
+        # 1. REAPER (-0.5R Bailout on H1 Momentum)
+        if current_r <= -0.5:
+            rates_h1 = mt5.copy_rates_from_pos(pos.symbol, mt5.TIMEFRAME_H1, 0, 2)
+            if rates_h1 is not None and len(rates_h1) > 1:
+                cur_h1 = rates_h1[-2]
+                h1_body = abs(cur_h1['close'] - cur_h1['open'])
+                if is_buy and cur_h1['close'] < cur_h1['open'] and h1_body > m15_atr:
+                    if _close_position(pos, "REAPER_FLIP", MAGIC_CONTINUATION):
+                        log_structural_flip(pos.ticket, reason="REAPER_FLIP")
+                        logger.warning(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] REAPER killed trade early (-0.5R).")
+                    continue
+                elif not is_buy and cur_h1['close'] > cur_h1['open'] and h1_body > m15_atr:
+                    if _close_position(pos, "REAPER_FLIP", MAGIC_CONTINUATION):
+                        log_structural_flip(pos.ticket, reason="REAPER_FLIP")
+                        logger.warning(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] REAPER killed trade early (-0.5R).")
+                    continue
+        
+        # 2. PROTECTOR (Break Even + Buffer Gate triggered at 1.0R)
+        if current_r >= 1.0:
+            sl_needs_be = (pos.sl < be_plus_buffer) if is_buy else (pos.sl == 0 or pos.sl > be_plus_buffer)
+            if sl_needs_be:
+                req = {
+                    "action": mt5.TRADE_ACTION_SLTP, 
+                    "position": pos.ticket, 
+                    "symbol": pos.symbol,
+                    "sl": round(be_plus_buffer, sym_info.digits), 
+                    "tp": 0.0
+                }
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] hits 1R. PROTECTOR locked BE + buffer.")
+                continue
+
+        # 3. ELASTIC TRAILING (1.0R gap between 1.0R and 2.0R | 0.5R gap > 2.0R) - UNLIMITED RUNNING
+        is_at_be = (pos.sl >= be_plus_buffer) if is_buy else (pos.sl > 0 and pos.sl <= be_plus_buffer)
+        if is_at_be:
+            min_step = sym_info.point * 10
+            trail_gap = (initial_risk_price * 0.5) if current_r >= 2.0 else (initial_risk_price * 1.0)
+            trail_level = pos.price_current - trail_gap if is_buy else pos.price_current + trail_gap
+            needs_trail = (trail_level > pos.sl + min_step) if is_buy else (trail_level < pos.sl - min_step)
+            
+            if needs_trail:
+                req = {
+                    "action": mt5.TRADE_ACTION_SLTP, 
+                    "position": pos.ticket, 
+                    "symbol": pos.symbol,
+                    "sl": round(trail_level, sym_info.digits), 
+                    "tp": 0.0
+                }
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] ELASTIC TRAIL updated to {trail_level:.5f}")
+        
+        # 4. Active H1 Structural Invalidation (Losing Trades ONLY)
+        if pos.profit < 0:
+            rates = mt5.copy_rates_from_pos(pos.symbol, mt5.TIMEFRAME_H1, 1, 4)
+            if rates is not None and len(rates) >= 4:
+                df = pd.DataFrame(rates)
+                tick = mt5.symbol_info_tick(pos.symbol)
+                if tick is None:
+                    continue
+                
+                breached = False
+                if is_buy and tick.bid < df['low'].min():
+                    breached = True
+                elif not is_buy and tick.ask > df['high'].max():
+                    breached = True
+                    
+                if breached:
+                    if _close_position(pos, "H1_STRUCT_INVALID", MAGIC_CONTINUATION):
+                        log_structural_flip(pos.ticket, reason="H1_STRUCT_INVALID")
+                        logger.warning(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] Killed early due to H1 Structural Invalidation.")
+
+def execute_continuation_entries():
+    """
+    Execution routine for Trend Continuation Vector (ADX 30 to 60).
+    Requires valid trading session (12:00 to 22:00 broker hours).
+    Aligns H4 Inversion signal with directional +DI / -DI momentum.
+    """
+    global last_h4_bar
+    
+    positions = mt5.positions_get()
+    open_positions = {}
+    if positions:
+        for p in positions:
+            if p.magic == MAGIC_CONTINUATION:
+                open_positions.setdefault(p.symbol, []).append(p)
+
+    for sym in config.SYMBOLS:
+        sym_info = mt5.symbol_info(sym)
+        if sym_info is None or not sym_info.visible: 
+            continue
+        
+        rates_h4 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H4, 0, 1)
+        if rates_h4 is None or len(rates_h4) == 0: 
+            continue
+        
+        current_h4_time = rates_h4[0]['time']
+        if current_h4_time == last_h4_bar[sym]: 
+            continue
+
+        # 1. Session Filter (12:00 to 22:00 server hours required)
+        if not is_valid_session(sym):
+            continue
+
+        signal = check_h4_inversion(sym)
+        
+        # Close opposing positions on structural flip
+        pos_list = open_positions.get(sym, [])
+        for pos in pos_list:
+            is_buy = (pos.type == mt5.ORDER_TYPE_BUY)
+            if signal and ((is_buy and signal == "BEARISH") or (not is_buy and signal == "BULLISH")):
+                if _close_position(pos, "STRUCTURAL_FLIP", MAGIC_CONTINUATION):
+                    log_structural_flip(pos.ticket, reason="STRUCTURAL_FLIP") 
+
+        # 2. Base Signal Gate
+        if not signal: 
+            continue
+
+        # 3. ADX Impulsive Trend Gate (30 <= ADX <= 60) & Directional Alignment
+        adx, plus_di, minus_di = get_adx_directional(sym, mt5.TIMEFRAME_H4, 14)
+        if not (30.0 <= adx <= 60.0):
+            continue
+
+        # Check directional alignment (+DI vs -DI)
+        if signal == "BULLISH" and plus_di > minus_di:
+            order_type, comment = mt5.ORDER_TYPE_BUY, "CONT_TREND_BUY"
+        elif signal == "BEARISH" and minus_di > plus_di:
+            order_type, comment = mt5.ORDER_TYPE_SELL, "CONT_TREND_SELL"
+        else:
+            # Directional disagreement between inversion and DI momentum
+            continue
+
+        pip_size = sym_info.point * (10 if sym_info.digits in (3, 5) else 1)
+        current_spread_pips = sym_info.spread * sym_info.point / pip_size
+        max_allowed_pips = 1500.0 if "BTC" in sym or "ETH" in sym else 3.0
+        
+        if current_spread_pips > max_allowed_pips: 
+            continue
+
+        atr_h4 = get_atr(sym, mt5.TIMEFRAME_H4, config.ATR_PERIOD)
+        if not atr_h4 or atr_h4 <= 0: 
+            continue
+
+        exhaustion_state = check_exhaustion_filter(sym, is_buy=(signal == "BULLISH"))
+        smc_confluence = check_smc_confluence(sym, rates_h4)
+        tick_volume = rates_h4[0]['tick_volume']
+
+        sl_dist = atr_h4 * config.ATR_MULT_SL
+        tick = mt5.symbol_info_tick(sym)
+        if not tick:
+            continue
+        
+        # 4. Dynamic 1% Lot Sizing
+        calc_volume = calculate_dynamic_lot(sym, sl_dist, RISK_PERCENT)
+
+        if order_type == mt5.ORDER_TYPE_BUY:
+            entry_price = tick.ask
+            sl = entry_price - sl_dist
+        else:
+            entry_price = tick.bid
+            sl = entry_price + sl_dist
+
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL, 
+            "symbol": sym, 
+            "volume": float(calc_volume),
+            "type": order_type, 
+            "price": entry_price, 
+            "sl": round(sl, sym_info.digits),
+            "tp": 0.0,
+            "deviation": 20, 
+            "magic": MAGIC_CONTINUATION,
+            "comment": comment, 
+            "type_time": mt5.ORDER_TIME_GTC, 
+            "type_filling": _get_filling_mode(sym),
+        }
+        
+        # Mark as attempted to prevent spamming broker on failure
+        last_h4_bar[sym] = current_h4_time
+        res = mt5.order_send(req)
+        
+        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+            actual_price = res.price
+            requested_price = req['price']
+            slippage_pips = round((abs(actual_price - requested_price) / sym_info.point) / (10 if sym_info.digits in (3, 5) else 1), 2)
+            
+            try:
+                point_value = sym_info.trade_tick_value / (sym_info.trade_tick_size / sym_info.point)
+                sl_points = sl_dist / sym_info.point
+                risk_amount = sl_points * point_value * float(calc_volume)
+            except Exception:
+                risk_amount = 0.0
+
+            register_trade_context(
+                ticket=res.order,
+                risk_amount=risk_amount,
+                spread=round(current_spread_pips, 2),
+                slippage=slippage_pips,
+                exhaustion_state=exhaustion_state,
+                volume=tick_volume,
+                smc_confluence=smc_confluence
+            )
+            
+            logger.info(f"[CONTINUATION ENTRY] Executed {sym} | ADX: {adx:.1f} (+DI={plus_di:.1f}, -DI={minus_di:.1f}) | Lot: {calc_volume} | Trigger: {comment}")
+        else:
+            logger.error(f"[{sym}] Continuation Entry Failed. Retcode: {res.retcode if res else 'None'}")
+
+--- strat_grid.py ---
+import MetaTrader5 as mt5
+import pandas as pd
+import logging
+import math
+import config
+from metrics import register_trade_context, log_structural_flip
+from shared_utils import (
+    _get_filling_mode,
+    get_atr,
+    get_adx_directional,
+    check_h4_inversion,
+    check_exhaustion_filter,
+    check_smc_confluence,
+    _close_position
+)
+
+# Magic Number for Range Extraction Grid (ADX < 30)
+MAGIC_GRID = 9995553
+MAX_GRID_LAYERS = 5         # Maximum number of layers per symbol basket
+
+last_h4_bar = {sym: None for sym in config.SYMBOLS}
+logger = logging.getLogger("STRAT_GRID")
+
+def _calculate_grid_addon_lot(sym_info, previous_lot: float) -> float:
+    """Calculates next layer lot size (1.5x previous lot, clamped and stepped)."""
+    raw_lot = previous_lot * 1.5
+    step = sym_info.volume_step if sym_info.volume_step > 0 else 0.01
+    lot_size = round(raw_lot / step) * step
+    lot_size = max(sym_info.volume_min, min(lot_size, sym_info.volume_max))
+    if step == 0.01:
+        return round(lot_size, 2)
+    elif step == 0.1:
+        return round(lot_size, 1)
+    else:
+        return round(lot_size, 2)
+
+def manage_grid_positions():
+    """
+    Basket & Lifecycle management for Range Extraction Grid (Magic: 9995553).
+    - Dynamic VWAP + ATR targeting based on H4 ADX Regime.
+    """
+    positions = mt5.positions_get()
+    if not positions:
+        return
+    
+    grid_positions = [p for p in positions if p.magic == MAGIC_GRID]
+    if not grid_positions:
+        return
+
+    baskets_by_sym = {}
+    for pos in grid_positions:
+        baskets_by_sym.setdefault(pos.symbol, []).append(pos)
+    
+    for sym, basket in baskets_by_sym.items():
+        if not basket:
+            continue
+            
+        sym_info = mt5.symbol_info(sym)
+        if not sym_info:
+            continue
+        
+        is_buy = basket[0].type == mt5.ORDER_TYPE_BUY
+        if any((p.type == mt5.ORDER_TYPE_BUY) != is_buy for p in basket):
+            logger.error(f"[GRID ERROR] Mixed position directions detected in basket for {sym}.")
+            continue
+            
+        total_volume = sum(p.volume for p in basket)
+        vwap = sum(p.volume * p.price_open for p in basket) / total_volume
+        
+        adx, _, _ = get_adx_directional(sym, mt5.TIMEFRAME_H4, 14)
+        h4_atr = get_atr(sym, mt5.TIMEFRAME_H4, config.ATR_PERIOD)
+        if not h4_atr or h4_atr <= 0:
+            continue
+            
+        # State 1: The Kill Switch (ADX > 35)
+        if adx > 35:
+            logger.warning(f"[GRID KILL-SWITCH] ADX breached 35 ({adx:.1f}). Liquidating grid basket for {sym} ({len(basket)} legs).")
+            for pos in basket:
+                if _close_position(pos, "GRID_KILL_ADX35", MAGIC_GRID):
+                    log_structural_flip(pos.ticket, reason="GRID_KILL_ADX35")
+            continue
+            
+        # State 2 & 3 Target calculation
+        if 30 <= adx <= 35:
+            # The Escape Hatch
+            target_price = vwap + (sym_info.point * 10) if is_buy else vwap - (sym_info.point * 10)
+        else:
+            # Normal Extraction (ADX < 30)
+            target_price = vwap + (0.5 * h4_atr) if is_buy else vwap - (0.5 * h4_atr)
+            
+        # Execution Trigger
+        tick = mt5.symbol_info_tick(sym)
+        if not tick:
+            continue
+            
+        current_price = tick.bid if is_buy else tick.ask
+        hit_target = (is_buy and current_price >= target_price) or (not is_buy and current_price <= target_price)
+        
+        if hit_target:
+            logger.info(f"[GRID HARVEST] Basket closed for {sym} at VWAP Target. ADX: {adx:.1f}")
+            for pos in basket:
+                if _close_position(pos, "GRID_VWAP_TARGET", MAGIC_GRID):
+                    log_structural_flip(pos.ticket, reason="GRID_VWAP_TARGET")
+
+def execute_grid_entries():
+    """
+    Entry & Scaling logic for Range Extraction Grid (ADX < 30).
+    - If NO open positions: Triggers 0.01 lot base anchor on H4 inversion.
+    - If open positions exist: Scales in 1.5x volume if price moves >= 1.0 * H4 ATR adversely.
+    """
+    global last_h4_bar
+    
+    positions = mt5.positions_get()
+    all_grid_positions = [p for p in positions if p.magic == MAGIC_GRID] if positions else []
+    baskets_by_sym = {}
+    for pos in all_grid_positions:
+        baskets_by_sym.setdefault(pos.symbol, []).append(pos)
+
+    for sym in config.SYMBOLS:
+        sym_info = mt5.symbol_info(sym)
+        if sym_info is None or not sym_info.visible:
+            continue
+        
+        rates_h4 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H4, 0, 1)
+        if rates_h4 is None or len(rates_h4) == 0:
+            continue
+        
+        current_h4_time = rates_h4[0]['time']
+        # 1. Regime Gate: ADX < 30 ONLY (Ranging / Chop Market)
+        adx, _, _ = get_adx_directional(sym, mt5.TIMEFRAME_H4, 14)
+        if adx >= 30.0:
+            continue
+
+        pip_size = sym_info.point * (10 if sym_info.digits in (3, 5) else 1)
+        current_spread_pips = sym_info.spread * sym_info.point / pip_size
+        max_allowed_pips = 1500.0 if "BTC" in sym or "ETH" in sym else 3.0
+        if current_spread_pips > max_allowed_pips:
+            continue
+
+        h4_atr = get_atr(sym, mt5.TIMEFRAME_H4, config.ATR_PERIOD)
+        if not h4_atr or h4_atr <= 0:
+            continue
+
+        tick = mt5.symbol_info_tick(sym)
+        if not tick:
+            continue
+
+        basket = baskets_by_sym.get(sym, [])
+
+        # Case 1: Initial Entry (No open grid positions for this symbol)
+        if len(basket) == 0:
+            # Only apply H4 bar deduplication to initial entries
+            if current_h4_time == last_h4_bar[sym]:
+                continue
+            signal = check_h4_inversion(sym)
+            if not signal:
+                continue
+
+            base_lot = max(0.01, sym_info.volume_min)
+            if signal == "BULLISH":
+                entry_price = tick.ask
+                order_type, comment = mt5.ORDER_TYPE_BUY, "GRID_BASE"
+            elif signal == "BEARISH":
+                entry_price = tick.bid
+                order_type, comment = mt5.ORDER_TYPE_SELL, "GRID_BASE"
+            else:
+                continue
+
+            req = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": sym,
+                "volume": float(base_lot),
+                "type": order_type,
+                "price": entry_price,
+                "sl": 0.0,
+                "tp": 0.0,
+                "deviation": 20,
+                "magic": MAGIC_GRID,
+                "comment": comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": _get_filling_mode(sym),
+            }
+
+            # Enforce cooldown on failure
+            last_h4_bar[sym] = current_h4_time
+            res = mt5.order_send(req)
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                register_trade_context(
+                    ticket=res.order,
+                    risk_amount=0.0,
+                    spread=round(current_spread_pips, 2),
+                    slippage=0.0,
+                    exhaustion_state=False,
+                    volume=rates_h4[0]['tick_volume'],
+                    smc_confluence="GRID_INITIAL"
+                )
+                logger.info(f"[GRID BASE ENTRY] Executed {sym} | Lot: {base_lot} | Type: {comment} | ADX: {adx:.1f}")
+            else:
+                logger.error(f"[{sym}] Grid Base Entry Failed. Retcode: {res.retcode if res else 'None'}")
+
+        # Case 2: Scaling / Add-On Layer (Existing basket open)
+        else:
+            is_buy = (basket[0].type == mt5.ORDER_TYPE_BUY)
+            
+            # Find the worst-priced position in the active basket
+            if is_buy:
+                worst_pos = min(basket, key=lambda p: p.price_open)
+                worst_price = worst_pos.price_open
+                current_price = tick.ask
+                adverse_move = worst_price - current_price  # Price dropped below worst BUY price
+            else:
+                worst_pos = max(basket, key=lambda p: p.price_open)
+                worst_price = worst_pos.price_open
+                current_price = tick.bid
+                adverse_move = current_price - worst_price  # Price rose above worst SELL price
+
+            # Check if adverse move is >= 1.0 * H4 ATR and basket not at max depth
+            if adverse_move >= (1.0 * h4_atr) and len(basket) < MAX_GRID_LAYERS:
+                previous_lot = worst_pos.volume
+                next_lot = _calculate_grid_addon_lot(sym_info, previous_lot)
+                order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+                comment = "GRID_ADDON"
+
+                req = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": sym,
+                    "volume": float(next_lot),
+                    "type": order_type,
+                    "price": current_price,
+                    "sl": 0.0,
+                    "tp": 0.0,
+                    "deviation": 20,
+                    "magic": MAGIC_GRID,
+                    "comment": comment,
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": _get_filling_mode(sym),
+                }
+
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    last_h4_bar[sym] = current_h4_time
+                    register_trade_context(
+                        ticket=res.order,
+                        risk_amount=0.0,
+                        spread=round(current_spread_pips, 2),
+                        slippage=0.0,
+                        exhaustion_state=False,
+                        volume=rates_h4[0]['tick_volume'],
+                        smc_confluence="GRID_LAYER"
+                    )
+                    logger.info(f"[GRID ADDON ENTRY] Layer {len(basket)+1} on {sym} | Lot: {next_lot} (prev={previous_lot}) | Step: {adverse_move:.5f} (>= {h4_atr:.5f} ATR)")
+                else:
+                    logger.error(f"[{sym}] Grid Addon Entry Failed. Retcode: {res.retcode if res else 'None'}")
+
+--- strat_inversion.py ---
+import MetaTrader5 as mt5
+import pandas as pd
+import logging
+import math
+import config
+from metrics import register_trade_context, log_structural_flip
+from shared_utils import (
+    _get_filling_mode,
+    get_atr,
+    get_adx_directional,
+    calculate_dynamic_lot,
+    check_h4_inversion,
+    check_exhaustion_filter,
+    check_smc_confluence,
+    _close_position
+)
+
+# Magic Number hardcoded for the Inversion Vector (ADX > 60)
+MAGIC_INVERSION = 9995551
+RISK_PERCENT = 0.01  # 1% Account Risk per trade
+
+last_h4_bar = {sym: None for sym in config.SYMBOLS}
+logger = logging.getLogger("STRAT_INVERSION")
+
+def manage_inversion_positions():
+    """
+    Trade management for Inversion positions (Magic: 9995551).
+    - Reaper (-0.5R H1 momentum exit)
+    - Harvester (> 2.0R on M15 wick exhaustion)
+    - Protector (Lock BE + buffer at 1.0R)
+    - Elastic Trailing (1.0R trail between 1R-2R, 0.5R trail > 2R)
+    - H1 Structural Invalidation for losing trades
+    """
+    positions = mt5.positions_get()
+    if not positions:
+        return
+    
+    for pos in positions:
+        if pos.magic != MAGIC_INVERSION:
+            continue
+        sym_info = mt5.symbol_info(pos.symbol)
+        if not sym_info:
+            continue
+        
+        orders = mt5.history_orders_get(position=pos.ticket)
+        if not orders:
+            continue
+        entry_order = next((o for o in orders if o.type in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL)), None)
+        if not entry_order or entry_order.sl == 0:
+            continue
+        
+        initial_risk_price = abs(pos.price_open - entry_order.sl)
+        if initial_risk_price <= 0:
+            continue
+        
+        is_buy = pos.type == mt5.ORDER_TYPE_BUY
+        profit_price_dist = (pos.price_current - pos.price_open) if is_buy else (pos.price_open - pos.price_current)
+        current_r = profit_price_dist / initial_risk_price if initial_risk_price > 0 else 0.0
+        
+        five_dollars_target = 5.0
+        tick_val = sym_info.trade_tick_value
+        tick_sz = sym_info.trade_tick_size
+        if tick_val > 0 and pos.volume > 0 and tick_sz > 0:
+            price_for_five = (five_dollars_target / (tick_val * pos.volume)) * tick_sz
+        else:
+            price_for_five = sym_info.point * 50
+            
+        m15_atr_raw = get_atr(pos.symbol, mt5.TIMEFRAME_M15, 14)
+        m15_atr = (price_for_five * 2) if m15_atr_raw <= 0 or math.isnan(m15_atr_raw) else m15_atr_raw
+        
+        buffer_price = max(price_for_five, m15_atr * 0.1)
+        be_plus_buffer = pos.price_open + buffer_price if is_buy else pos.price_open - buffer_price
+        
+        # 1. REAPER (-0.5R Bailout on H1 Momentum)
+        if current_r <= -0.5:
+            rates_h1 = mt5.copy_rates_from_pos(pos.symbol, mt5.TIMEFRAME_H1, 0, 2)
+            if rates_h1 is not None and len(rates_h1) > 1:
+                cur_h1 = rates_h1[-2]
+                h1_body = abs(cur_h1['close'] - cur_h1['open'])
+                if is_buy and cur_h1['close'] < cur_h1['open'] and h1_body > m15_atr:
+                    if _close_position(pos, "REAPER_FLIP", MAGIC_INVERSION):
+                        log_structural_flip(pos.ticket, reason="REAPER_FLIP")
+                        logger.warning(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] REAPER killed trade early (-0.5R).")
+                    continue
+                elif not is_buy and cur_h1['close'] > cur_h1['open'] and h1_body > m15_atr:
+                    if _close_position(pos, "REAPER_FLIP", MAGIC_INVERSION):
+                        log_structural_flip(pos.ticket, reason="REAPER_FLIP")
+                        logger.warning(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] REAPER killed trade early (-0.5R).")
+                    continue
+        
+        # 2. HARVESTER (> 2.0R Exhaustion Market Close)
+        if current_r >= 2.0:
+            if check_exhaustion_filter(pos.symbol, is_buy=is_buy):
+                if _close_position(pos, "HARVESTER", MAGIC_INVERSION):
+                    log_structural_flip(pos.ticket, reason="HARVESTER")
+                    logger.info(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] HARVESTER closed trade at peak!")
+                continue
+
+        # 3. PROTECTOR (Break Even + Buffer Gate triggered at 1.0R)
+        if current_r >= 1.0:
+            sl_needs_be = (pos.sl < be_plus_buffer) if is_buy else (pos.sl == 0 or pos.sl > be_plus_buffer)
+            if sl_needs_be:
+                req = {
+                    "action": mt5.TRADE_ACTION_SLTP, 
+                    "position": pos.ticket, 
+                    "symbol": pos.symbol,
+                    "sl": round(be_plus_buffer, sym_info.digits), 
+                    "tp": 0.0
+                }
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] hits 1R. PROTECTOR locked BE + buffer.")
+                continue
+
+        # 4. ELASTIC TRAILING (1.0R gap between 1.0R and 2.0R | 0.5R gap > 2.0R)
+        is_at_be = (pos.sl >= be_plus_buffer) if is_buy else (pos.sl > 0 and pos.sl <= be_plus_buffer)
+        if is_at_be:
+            min_step = sym_info.point * 10
+            trail_gap = (initial_risk_price * 0.5) if current_r >= 2.0 else (initial_risk_price * 1.0)
+            trail_level = pos.price_current - trail_gap if is_buy else pos.price_current + trail_gap
+            needs_trail = (trail_level > pos.sl + min_step) if is_buy else (trail_level < pos.sl - min_step)
+            
+            if needs_trail:
+                req = {
+                    "action": mt5.TRADE_ACTION_SLTP, 
+                    "position": pos.ticket, 
+                    "symbol": pos.symbol,
+                    "sl": round(trail_level, sym_info.digits), 
+                    "tp": 0.0
+                }
+                res = mt5.order_send(req)
+                if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] ELASTIC TRAIL updated to {trail_level:.5f}")
+        
+        # 5. Active H1 Structural Invalidation (Losing Trades ONLY)
+        if pos.profit < 0:
+            rates = mt5.copy_rates_from_pos(pos.symbol, mt5.TIMEFRAME_H1, 1, 4)
+            if rates is not None and len(rates) >= 4:
+                df = pd.DataFrame(rates)
+                tick = mt5.symbol_info_tick(pos.symbol)
+                if tick is None:
+                    continue
+                
+                breached = False
+                if is_buy and tick.bid < df['low'].min():
+                    breached = True
+                elif not is_buy and tick.ask > df['high'].max():
+                    breached = True
+                    
+                if breached:
+                    if _close_position(pos, "H1_STRUCT_INVALID", MAGIC_INVERSION):
+                        log_structural_flip(pos.ticket, reason="H1_STRUCT_INVALID")
+                        logger.warning(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] Killed early due to H1 Structural Invalidation.")
+
+def execute_inversion_entries():
+    """
+    Execution routine for Inversion Vector (ADX > 60).
+    Trades 24/5 without session restrictions when parabolic exhaustion is met.
+    """
+    global last_h4_bar
+    
+    positions = mt5.positions_get()
+    open_positions = {}
+    if positions:
+        for p in positions:
+            if p.magic == MAGIC_INVERSION:
+                open_positions.setdefault(p.symbol, []).append(p)
+
+    for sym in config.SYMBOLS:
+        sym_info = mt5.symbol_info(sym)
+        if sym_info is None or not sym_info.visible: 
+            continue
+        
+        rates_h4 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H4, 0, 1)
+        if rates_h4 is None or len(rates_h4) == 0: 
+            continue
+        
+        current_h4_time = rates_h4[0]['time']
+        if current_h4_time == last_h4_bar[sym]: 
+            continue
+
+        signal = check_h4_inversion(sym)
+        
+        # Close opposing positions on structural flip
+        pos_list = open_positions.get(sym, [])
+        for pos in pos_list:
+            is_buy = (pos.type == mt5.ORDER_TYPE_BUY)
+            if signal and ((is_buy and signal == "BEARISH") or (not is_buy and signal == "BULLISH")):
+                if _close_position(pos, "STRUCTURAL_FLIP", MAGIC_INVERSION):
+                    log_structural_flip(pos.ticket, reason="STRUCTURAL_FLIP") 
+
+        # 1. Base Signal Gate
+        if not signal: 
+            continue
+
+        # 2. ADX Momentum Exhaustion Gate (ADX > 60 ONLY, 24/5 allowed)
+        adx, plus_di, minus_di = get_adx_directional(sym, mt5.TIMEFRAME_H4, 14)
+        if adx <= 60:
+            continue
+
+        pip_size = sym_info.point * (10 if sym_info.digits in (3, 5) else 1)
+        current_spread_pips = sym_info.spread * sym_info.point / pip_size
+        max_allowed_pips = 1500.0 if "BTC" in sym or "ETH" in sym else 3.0
+        
+        if current_spread_pips > max_allowed_pips: 
+            continue
+
+        atr_h4 = get_atr(sym, mt5.TIMEFRAME_H4, config.ATR_PERIOD)
+        if not atr_h4 or atr_h4 <= 0: 
+            continue
+
+        exhaustion_state = check_exhaustion_filter(sym, is_buy=(signal == "BULLISH"))
+        smc_confluence = check_smc_confluence(sym, rates_h4)
+        tick_volume = rates_h4[0]['tick_volume']
+
+        sl_dist = atr_h4 * config.ATR_MULT_SL
+        tick = mt5.symbol_info_tick(sym)
+        if not tick:
+            continue
+        
+        # 3. Dynamic 1% Lot Sizing
+        calc_volume = calculate_dynamic_lot(sym, sl_dist, RISK_PERCENT)
+
+        if signal == "BULLISH":
+            entry_price = tick.ask
+            sl = entry_price - sl_dist
+            order_type, comment = mt5.ORDER_TYPE_BUY, "INV_EXH_BUY"
+        elif signal == "BEARISH":
+            entry_price = tick.bid
+            sl = entry_price + sl_dist
+            order_type, comment = mt5.ORDER_TYPE_SELL, "INV_EXH_SELL"
+        else:
+            continue
+
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL, 
+            "symbol": sym, 
+            "volume": float(calc_volume),
+            "type": order_type, 
+            "price": entry_price, 
+            "sl": round(sl, sym_info.digits),
+            "tp": 0.0,
+            "deviation": 20, 
+            "magic": MAGIC_INVERSION,
+            "comment": comment, 
+            "type_time": mt5.ORDER_TIME_GTC, 
+            "type_filling": _get_filling_mode(sym),
+        }
+        
+        # Mark as attempted to prevent spamming broker on failure
+        last_h4_bar[sym] = current_h4_time
+        res = mt5.order_send(req)
+        
+        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+            actual_price = res.price
+            requested_price = req['price']
+            slippage_pips = round((abs(actual_price - requested_price) / sym_info.point) / (10 if sym_info.digits in (3, 5) else 1), 2)
+            
+            try:
+                point_value = sym_info.trade_tick_value / (sym_info.trade_tick_size / sym_info.point)
+                sl_points = sl_dist / sym_info.point
+                risk_amount = sl_points * point_value * float(calc_volume)
+            except Exception:
+                risk_amount = 0.0
+
+            register_trade_context(
+                ticket=res.order,
+                risk_amount=risk_amount,
+                spread=round(current_spread_pips, 2),
+                slippage=slippage_pips,
+                exhaustion_state=exhaustion_state,
+                volume=tick_volume,
+                smc_confluence=smc_confluence
+            )
+            
+            logger.info(f"[EXHAUSTION ENTRY] Executed {sym} | ADX: {adx:.1f} | Lot: {calc_volume} | Trigger: {comment}")
+        else:
+            logger.error(f"[{sym}] Inversion Entry Failed. Retcode: {res.retcode if res else 'None'}")
+
+--- test_health.py ---
+import sys
+import io
+
+# Ensure UTF-8 output encoding
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+import MetaTrader5 as mt5
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger()
+
+def run_tri_vector_diagnostics():
+    logger.info("Starting Tri-Vector Architecture Health Check...")
+
+    # 1. Module Import Verification
+    try:
+        import config
+        import shared_utils
+        import metrics
+        import strat_inversion
+        import strat_continuation
+        import strat_grid
+        logger.info("✔️ All Tri-Vector modules imported successfully.")
+    except ImportError as e:
+        logger.error(f"❌ Module Import Failed: {e}")
+        sys.exit(1)
+
+    # 2. Terminal Connectivity
+    if not mt5.initialize(path=getattr(config, 'TERMINAL_PATH', None)):
+        logger.error(f"❌ MT5 Initialization Failed. Error: {mt5.last_error()}")
+        sys.exit(1)
+    logger.info("✔️ MT5 Terminal Connected.")
+
+    # 3. Data Feed Validation across configured symbols
+    for sym in config.SYMBOLS:
+        sym_info = mt5.symbol_info(sym)
+        if sym_info is None:
+            logger.error(f"❌ Symbol {sym} not found or not visible.")
+            continue
+        
+        # Test H4 Data & ADX calculation
+        adx, plus_di, minus_di = shared_utils.get_adx_directional(sym, mt5.TIMEFRAME_H4, 14)
+        atr = shared_utils.get_atr(sym, mt5.TIMEFRAME_H4, config.ATR_PERIOD)
+        logger.info(f"✔️ {sym} Feed OK | ADX: {adx:.1f} (+DI: {plus_di:.1f} / -DI: {minus_di:.1f}) | ATR: {atr:.5f}")
+
+    # 4. Magic Number Segregation Check
+    magics = {
+        "Inversion": strat_inversion.MAGIC_INVERSION,
+        "Continuation": strat_continuation.MAGIC_CONTINUATION,
+        "Grid": strat_grid.MAGIC_GRID
+    }
+    logger.info(f"✔️ Magic Number Registry Verified: {magics}")
+
+    mt5.shutdown()
+    logger.info("=== Tri-Vector Health Check Complete. System is green for Monday deployment. ===")
+
+if __name__ == "__main__":
+    run_tri_vector_diagnostics()

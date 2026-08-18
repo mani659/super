@@ -1,0 +1,843 @@
+
+--- config.py ---
+"""
+==================================================================
+                  CAB MASTER - CONFIGURATION
+==================================================================
+Central source of truth for terminal paths, risk settings,
+and symbol-specific parameters.
+==================================================================
+"""
+
+import os
+import MetaTrader5 as mt5
+
+# --- SYSTEM & TERMINAL PATHS ---
+TERMINAL_PATH = r"C:\Program Files\MetaTrader 5 EXNESS - Copy\terminal64.exe"
+COMMON_PATH   = r"C:\Users\ABRAR\AppData\Roaming\MetaQuotes\Terminal\Common\Files"
+HEARTBEAT_FILE = os.path.join(COMMON_PATH, "cab_heartbeat.txt")
+LEDGER_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cab_performance_ledger.csv")
+
+# --- GLOBAL ENGINE CONSTANTS ---
+MAGIC_NUMBER     = 999555
+COOLDOWN_MINUTES = 15
+TF_ATR           = mt5.TIMEFRAME_H1
+STAGNATION_HOURS = 24
+
+# --- PAIR-SPECIFIC CONFIGURATIONS ---
+PAIRS = {
+    "XAUUSDm": {
+        "RISK_PERCENT": 1.0,
+        "ATR_MULT_SL": 2.5,
+        "MAX_SPREAD": 500,
+        "BE_GATE_R": 0.8,
+        "LOCK_GATE_R": 1.0,
+        "PARTIAL_R": 1.5
+    },
+    "BTCUSDm": {
+        "RISK_PERCENT": 0.5,
+        "ATR_MULT_SL": 3.0,
+        "MAX_SPREAD": 2000,
+        "BE_GATE_R": 1.0,
+        "LOCK_GATE_R": 1.5,
+        "PARTIAL_R": 2.0
+    },
+    "ETHUSDm": {
+        "RISK_PERCENT": 0.5,
+        "ATR_MULT_SL": 3.0,
+        "MAX_SPREAD": 1500,
+        "BE_GATE_R": 1.0,
+        "LOCK_GATE_R": 1.5,
+        "PARTIAL_R": 2.0
+    },
+    "USTECm": {
+        "RISK_PERCENT": 1.0,
+        "ATR_MULT_SL": 2.5,
+        "MAX_SPREAD": 300,
+        "BE_GATE_R": 0.8,
+        "LOCK_GATE_R": 1.0,
+        "PARTIAL_R": 1.5
+    },
+    "USOILm": {
+        "RISK_PERCENT": 1.0,
+        "ATR_MULT_SL": 2.5,
+        "MAX_SPREAD": 100,
+        "BE_GATE_R": 0.8,
+        "LOCK_GATE_R": 1.0,
+        "PARTIAL_R": 1.5
+    },
+    "EURUSDm": {
+        "RISK_PERCENT": 1.0,
+        "ATR_MULT_SL": 2.5,
+        "MAX_SPREAD": 50,
+        "BE_GATE_R": 0.8,
+        "LOCK_GATE_R": 1.0,
+        "PARTIAL_R": 1.5
+    },
+    "GBPUSDm": {
+        "RISK_PERCENT": 1.0,
+        "ATR_MULT_SL": 2.5,
+        "MAX_SPREAD": 80,
+        "BE_GATE_R": 0.8,
+        "LOCK_GATE_R": 1.0,
+        "PARTIAL_R": 1.5
+    },
+    "USDJPYm": {
+        "RISK_PERCENT": 1.0,
+        "ATR_MULT_SL": 2.5,
+        "MAX_SPREAD": 80,
+        "BE_GATE_R": 0.8,
+        "LOCK_GATE_R": 1.0,
+        "PARTIAL_R": 1.5
+    },
+    "EURGBPm": {
+        "RISK_PERCENT": 1.0,
+        "ATR_MULT_SL": 2.5,
+        "MAX_SPREAD": 80,
+        "BE_GATE_R": 0.8,
+        "LOCK_GATE_R": 1.0,
+        "PARTIAL_R": 1.5
+    },
+    "AUDNZDm": {
+        "RISK_PERCENT": 1.0,
+        "ATR_MULT_SL": 2.5,
+        "MAX_SPREAD": 100,
+        "BE_GATE_R": 0.8,
+        "LOCK_GATE_R": 1.0,
+        "PARTIAL_R": 1.5
+    },
+    "XAGUSDm": {
+        "RISK_PERCENT": 1.0,
+        "ATR_MULT_SL": 3.0,
+        "MAX_SPREAD": 200,
+        "BE_GATE_R": 1.0,
+        "LOCK_GATE_R": 1.2,
+        "PARTIAL_R": 2.0
+    }
+}
+
+# Derived list for legacy backward-compatibility
+SYMBOLS = list(PAIRS.keys())
+--- connection.py ---
+"""
+==================================================================
+                  CAB MASTER - CONNECTION ENGINE
+==================================================================
+Handles MT5 terminal initialization, health checks, and 
+the system heartbeat writer for CAB_Global_Sentinel failover.
+==================================================================
+"""
+
+import MetaTrader5 as mt5
+import os
+import time
+import logging
+import config
+
+def initialize_mt5() -> bool:
+    """Initializes MetaTrader 5 terminal using configured path."""
+    initialized = False
+    
+    if os.path.exists(config.TERMINAL_PATH):
+        if mt5.initialize(path=config.TERMINAL_PATH):
+            initialized = True
+            
+    if not initialized and mt5.initialize():
+        initialized = True
+            
+    if not initialized:
+        logging.error(f"CRITICAL: Initialization failure. Code: {mt5.last_error()}")
+        return False
+        
+    return True
+
+def is_connected() -> bool:
+    """Checks active broker terminal connection state."""
+    term_info = mt5.terminal_info()
+    return term_info is not None and term_info.connected
+
+def write_heartbeat() -> None:
+    """
+    Writes current system timestamp to shared heartbeat file.
+    Monitored by MQL5 CAB_Global_Sentinel for emergency failover.
+    """
+    try:
+        with open(config.HEARTBEAT_FILE, "wb") as f:
+            f.write(str(int(time.time())).encode('ascii'))
+    except Exception:
+        pass
+--- execution.py ---
+"""
+==================================================================
+                   CAB MASTER - EXECUTION ENGINE
+==================================================================
+Manages order generation, risk calculation integrations, 
+and broker execution dispatching.
+==================================================================
+"""
+
+import MetaTrader5 as mt5
+import logging
+import config
+from utils import get_atr, calculate_lot, _get_filling_mode
+from signals import check_h4_inversion
+from analytics.intelligencia import get_entry_intelligence
+
+# State tracker for locking active H4 macro bars per symbol
+last_h4_bars = {sym: 0 for sym in config.SYMBOLS}
+
+def execute_entries() -> None:
+    """Scans all configured symbols for macro signals and executes risk-managed entries."""
+    global last_h4_bars
+    
+    positions = mt5.positions_get()
+    open_symbols = [p.symbol for p in positions if p.magic == config.MAGIC_NUMBER] if positions else []
+
+    for sym in config.SYMBOLS:
+        if sym in open_symbols:
+            continue 
+
+        sym_info = mt5.symbol_info(sym)
+        if sym_info is None or not sym_info.visible:
+            continue
+            
+        # Ensure bar-locking matches only newly closed H4 bars
+        rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H4, 0, 1)
+        if rates is None or len(rates) == 0:
+            continue
+            
+        current_h4_time = rates[0]['time']
+        if current_h4_time == last_h4_bars[sym]:
+            continue
+        last_h4_bars[sym] = current_h4_time
+
+        signal = check_h4_inversion(sym)
+        if not signal:
+            continue
+
+        # Data-backed filter: Block entries in RISK_OFF + COMPRESSION_LOW
+        intel = get_entry_intelligence(sym)
+        if intel.get("Macro_Risk_Sentiment") == "RISK_OFF" and intel.get("H1_ATR_State") == "COMPRESSION_LOW":
+            logging.info(f"FILTERED: {sym} signal blocked due to RISK_OFF + COMPRESSION_LOW.")
+            continue
+
+        pair_conf = config.PAIRS.get(sym, {"RISK_PERCENT": 1.0, "ATR_MULT_SL": 2.5})
+        atr = get_atr(sym, config.TF_ATR, 14) 
+        if not atr:
+            continue
+
+        sl_dist = atr * pair_conf["ATR_MULT_SL"]
+        lot = calculate_lot(sym, sl_dist, pair_conf["RISK_PERCENT"])
+        tick = mt5.symbol_info_tick(sym)
+        if tick is None:
+            continue
+
+        if signal == "BULLISH":
+            sl = tick.bid - sl_dist
+            req = {
+                "action": mt5.TRADE_ACTION_DEAL, 
+                "symbol": sym, 
+                "volume": lot,
+                "type": mt5.ORDER_TYPE_BUY, 
+                "price": tick.ask, 
+                "sl": sl, 
+                "tp": 0.0,
+                "deviation": 20, 
+                "magic": config.MAGIC_NUMBER, 
+                "comment": "H4_MACRO_BUY",
+                "type_time": mt5.ORDER_TIME_GTC, 
+                "type_filling": _get_filling_mode(sym),
+            }
+            res = mt5.order_send(req)
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE: 
+                logging.info(f"ENTRY: Bought {sym} | Lot: {lot}")
+
+        elif signal == "BEARISH":
+            sl = tick.ask + sl_dist
+            req = {
+                "action": mt5.TRADE_ACTION_DEAL, 
+                "symbol": sym, 
+                "volume": lot,
+                "type": mt5.ORDER_TYPE_SELL, 
+                "price": tick.bid, 
+                "sl": sl, 
+                "tp": 0.0,
+                "deviation": 20, 
+                "magic": config.MAGIC_NUMBER, 
+                "comment": "H4_MACRO_SELL",
+                "type_time": mt5.ORDER_TIME_GTC, 
+                "type_filling": _get_filling_mode(sym),
+            }
+            res = mt5.order_send(req)
+            if res and res.retcode == mt5.TRADE_RETCODE_DONE: 
+                logging.info(f"ENTRY: Sold {sym} | Lot: {lot}")
+--- ledger.py ---
+"""
+==================================================================
+                   CAB MASTER - PERFORMANCE LEDGER
+==================================================================
+Manages excursion state memory (MFE/MAE), risk distances,
+environmental snapshot injection, and CSV performance output.
+==================================================================
+"""
+
+import MetaTrader5 as mt5
+import pandas as pd
+import os
+import time
+import logging
+from datetime import datetime
+import config
+
+# --- STATE MEMORY TRACKERS ---
+mfe_tracker = {}        
+mae_tracker = {}        
+entry_risk = {}         
+tracked_ids = set()     
+entry_intelligence = {} # NEW: Stores the Intelligencia Snapshot
+
+def write_to_performance_ledger(pos, reason: str, exit_price: float, historic_deal=None) -> None:
+    """Calculates structured metrics, merges Intelligencia data, and appends to CSV."""
+    global mfe_tracker, mae_tracker, entry_risk, entry_intelligence
+    
+    pos_id = pos.identifier if hasattr(pos, 'identifier') else pos.ticket
+    ticket = pos.ticket
+    symbol = pos.symbol
+    pos_type = pos.type
+    volume = pos.volume
+    price_open = pos.price_open
+    time_open = pos.time
+    
+    try:
+        is_buy = (pos_type == 0)
+        risk_dist = entry_risk.get(pos_id, 0)
+        
+        if risk_dist <= 0:
+            hist_orders = mt5.history_orders_get(position=pos_id)
+            if hist_orders:
+                for o in hist_orders:
+                    if o.sl > 0:
+                        risk_dist = abs(o.price_open - o.sl)
+                        break
+            if risk_dist <= 0:
+                risk_dist = max(0.00001, abs(price_open - exit_price))
+
+        risk_dist = max(risk_dist, 0.00001)
+
+        # 1. Realized Performance
+        gross_profit_price = (exit_price - price_open) if is_buy else (price_open - exit_price)
+        realized_r = round(gross_profit_price / risk_dist, 4)
+        
+        # 2. Historical Excursion Peaks (MFE / MAE)
+        peak_price = mfe_tracker.get(pos_id, exit_price)
+        worst_price = mae_tracker.get(pos_id, exit_price)
+        
+        mfe_move = (peak_price - price_open) if is_buy else (price_open - peak_price)
+        mae_move = (worst_price - price_open) if is_buy else (price_open - worst_price)
+        
+        mfe_r = round(max(0.0, mfe_move / risk_dist), 4)
+        mae_r = round(min(0.0, mae_move / risk_dist), 4)
+        
+        # 3. Retrieve Intelligencia Snapshot (Defaults if missing)
+        intel = entry_intelligence.get(pos_id, {
+            "Session": "UNKNOWN", "Active_Risk_Trades": 0, "H1_ATR_State": "UNKNOWN",
+            "H4_Trend_ADX": 0.0, "Macro_DXY_Proxy": "UNKNOWN", "Macro_Risk_Sentiment": "UNKNOWN"
+        })
+
+        # 4. Time Duration Tracking
+        time_open_str = datetime.fromtimestamp(time_open).strftime('%Y-%m-%d %H:%M:%S')
+        time_close_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        duration_hours = round((time.time() - time_open) / 3600.0, 2)
+
+        trade_data = {
+            "Ticket": ticket, "Symbol": symbol, "Direction": "BUY" if is_buy else "SELL",
+            "Volume": volume, "OpenTime": time_open_str, "CloseTime": time_close_str,
+            "DurationHours": duration_hours, "OpenPrice": price_open, "ExitPrice": exit_price,
+            "RiskDistancePrice": round(risk_dist, 5), "Realized_R": realized_r,
+            "MFE_Peak_R": mfe_r, "MAE_Trough_R": mae_r, "ExitReason": reason,
+            
+            # --- INTELLIGENCIA COLUMNS ---
+            "Intel_Session": intel["Session"],
+            "Intel_ActiveTrades": intel["Active_Risk_Trades"],
+            "Intel_ATR_State": intel["H1_ATR_State"],
+            "Intel_H4_ADX": intel["H4_Trend_ADX"],
+            "Intel_DXY_Trend": intel["Macro_DXY_Proxy"],
+            "Intel_Risk_Sentiment": intel["Macro_Risk_Sentiment"]
+        }
+        
+        df = pd.DataFrame([trade_data])
+        file_exists = os.path.isfile(config.LEDGER_FILE)
+        df.to_csv(config.LEDGER_FILE, mode='a', index=False, header=not file_exists)
+        logging.info(f"✔️ LEDGER SECURED: Position #{pos_id} [{reason}] saved with Intelligencia.")
+        
+    except Exception as ledger_error:
+        logging.error(f"Ledger Safe-Fail Warning: Could not write metrics. Reason: {ledger_error}")
+
+def sync_broker_closed_positions(active_ids: list) -> None:
+    """Detects missing trades that hit broker SL/TP and logs them."""
+    global tracked_ids, mfe_tracker, mae_tracker, entry_risk, entry_intelligence
+    
+    for vanished_id in list(tracked_ids):
+        if vanished_id not in active_ids:
+            logging.info(f"Detected missing trade #{vanished_id}. Fetching historical logs...")
+            time.sleep(0.5) 
+            
+            history_deals = mt5.history_deals_get(position=vanished_id)
+            matched = False
+            
+            if history_deals and len(history_deals) > 0:
+                entry_deal = next((d for d in history_deals if d.entry == 0), None)
+                exit_deal = next((d for d in history_deals if d.entry == 1), None)
+                
+                if entry_deal and exit_deal:
+                    class MockPosition:
+                        def __init__(self, en_d, ex_d, p_id):
+                            self.ticket = ex_d.position_id
+                            self.identifier = p_id
+                            self.symbol = ex_d.symbol
+                            self.type = en_d.type 
+                            self.volume = ex_d.volume
+                            self.price_open = en_d.price
+                            self.time = en_d.time
+                    
+                    mock_pos = MockPosition(entry_deal, exit_deal, vanished_id)
+                    reason_str = "BROKER_SL" if exit_deal.profit <= 0 else "BROKER_TP"
+                    write_to_performance_ledger(mock_pos, reason_str, exit_deal.price, historic_deal=exit_deal)
+                    matched = True
+            
+            # Memory Cleanup Protocol
+            tracked_ids.remove(vanished_id)
+            mfe_tracker.pop(vanished_id, None)
+            mae_tracker.pop(vanished_id, None)
+            entry_risk.pop(vanished_id, None)
+            entry_intelligence.pop(vanished_id, None) # Clear snapshot
+--- main.py ---
+"""
+==================================================================
+          CAB MASTER ENGINE v18.6 - MODULAR PRODUCTION BUILD           
+==================================================================
+Entry point orchestrator tying together connection, execution, 
+trade management, and performance tracking.
+==================================================================
+"""
+
+import time
+import logging
+import MetaTrader5 as mt5
+
+import config
+import connection
+import execution
+from trade_manager import manage_open_trades
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+def run_brain():
+    """Core runtime engine."""
+    if not connection.initialize_mt5():
+        return
+
+    logging.info("Baseline market synchronization. Pre-locking active macro bars...")
+    for sym in config.SYMBOLS:
+        rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H4, 0, 1)
+        if rates is not None and len(rates) > 0:
+            execution.last_h4_bars[sym] = rates[0]['time']
+
+    print(f"==================================================")
+    print(f"CAB MASTER v18.6 ONLINE | MODULAR BUILD")
+    print(f"==================================================")
+    print(f"Ledger Output Path: {config.LEDGER_FILE}")
+    print(f"==================================================")
+    
+    while True:
+        try:
+            if not connection.is_connected():
+                time.sleep(5)
+                continue
+                
+            # Keep CAB_Global_Sentinel alive[cite: 2]
+            connection.write_heartbeat()
+
+            # Core Trading Cycle
+            execution.execute_entries()
+            manage_open_trades()
+            
+        except Exception as e: 
+            logging.error(f"Global Loop Error: {e}")
+            
+        time.sleep(2)
+
+if __name__ == "__main__":
+    run_brain()
+--- signals.py ---
+"""
+==================================================================
+                   CAB MASTER - SIGNALS ENGINE
+==================================================================
+Handles technical condition analysis, including H4 macro inversions
+and H1 structural breakout/breach validations.
+==================================================================
+"""
+
+import MetaTrader5 as mt5
+import pandas as pd
+
+def check_h4_inversion(symbol: str) -> str | None:
+    """Queries completed candles exclusively to eliminate mid-bar data shifting."""
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H4, 1, 2)
+    if rates is None or len(rates) < 2:
+        return None
+        
+    c1_o, c1_c = rates[1]['open'], rates[1]['close'] # Completed Bar -1
+    c2_o, c2_c = rates[0]['open'], rates[0]['close'] # Completed Bar -2
+    
+    if c1_c > c1_o and c2_c < c2_o and c1_c > c2_o:
+        return "BULLISH"
+    if c1_c < c1_o and c2_c > c2_o and c1_c < c2_o:
+        return "BEARISH"
+        
+    return None
+
+def check_h1_structural_breach(symbol: str, is_buy: bool, lookback: int = 4) -> bool:
+    """Detects if current price has breached the extreme structural range of past H1 bars."""
+    rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 1, lookback)
+    if rates is None or len(rates) < lookback:
+        return False
+        
+    df = pd.DataFrame(rates)
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        return False
+        
+    return tick.bid < df['low'].min() if is_buy else tick.ask > df['high'].max()
+--- Structure.txt ---
+cab_master/
+│
+├── config.py           # Centralized settings, parameters & path configurations
+├── connection.py       # MT5 connection, health checks & heartbeat engine
+├── utils.py            # Math helpers, ATR indicators, lot-sizing & filling mode
+├── ledger.py           # Performance auditor, CSV recording & MFE/MAE state tracking
+│
+├── analytics/          # [FUTURE] Market Intelligencia Hub
+│   ├── __init__.py
+│   └── intelligencia.py# Multi-pair correlation, DXY metrics & market regime filters
+│
+├── signals.py          # Entry/Exit signals (H4 Inversion & H1 Structural Breach)
+├── trade_manager.py    # Active trade management, trailing SL & stagnation decay
+├── execution.py        # Order placement, broker communication & trade entry
+│
+└── main.py             # Central brain orchestrator & runtime loop
+--- test_health.py ---
+"""
+==================================================================
+           CAB MASTER - MODULAR HEALTH DIAGNOSTICS
+==================================================================
+Run this script to verify the structural integrity, paths, and
+variable mappings of the modular bot framework, including analytics.
+==================================================================
+"""
+
+import os
+import sys
+
+def run_diagnostics():
+    print("\n==================================================")
+    print("      CAB MASTER MODULAR HEALTH DIAGNOSTICS       ")
+    print("==================================================")
+    
+    # ---------------------------------------------------------
+    # 1. Module Import Testing
+    # ---------------------------------------------------------
+    print("\n[1] Testing Structural Imports...")
+    try:
+        import config
+        import connection
+        import utils
+        import ledger
+        import signals
+        import execution
+        import trade_manager
+        import main
+        import analytics.intelligencia  # NEW: Testing Analytics Import
+        print("  ✔️ All 9 core modules (including analytics) imported successfully.")
+    except ImportError as e:
+        print(f"  ❌ Import failed: {e}")
+        sys.exit(1)
+
+    # ---------------------------------------------------------
+    # 2. Configuration & Dictionary Inheritance
+    # ---------------------------------------------------------
+    print("\n[2] Validating Configuration Map...")
+    try:
+        import config
+        assert hasattr(config, 'TERMINAL_PATH'), "Missing TERMINAL_PATH in config"
+        assert len(config.SYMBOLS) > 0, "SYMBOLS list failed to derive from PAIRS"
+        assert "XAGUSDm" in config.SYMBOLS, "XAGUSDm not found in configuration list"
+        print(f"  ✔️ Config validated. Successfully derived {len(config.SYMBOLS)} dynamic symbols.")
+    except AssertionError as e:
+        print(f"  ❌ Configuration error: {e}")
+
+    # ---------------------------------------------------------
+    # 3. File System & Path Access
+    # ---------------------------------------------------------
+    print("\n[3] Checking File System & I/O Permissions...")
+    try:
+        import config
+        if os.path.exists(config.TERMINAL_PATH):
+            print(f"  ✔️ MT5 Terminal located at: {config.TERMINAL_PATH}")
+        else:
+            print(f"  ⚠️ MT5 Terminal NOT found: {config.TERMINAL_PATH}")
+    except Exception as e:
+        print(f"  ❌ File system check failed: {e}")
+
+    # ---------------------------------------------------------
+    # 4. Utility Fallbacks & Math Safety
+    # ---------------------------------------------------------
+    print("\n[4] Testing Logic Safety (Zero-Division Shields)...")
+    try:
+        import utils
+        test_lot = utils.calculate_lot("EURUSDm", 10.0, 1.0)
+        assert test_lot == 0.01, f"Fallback failed, got {test_lot}"
+        print("  ✔️ calculate_lot() fallback safety verified.")
+    except Exception as e:
+        print(f"  ❌ Math utility failed: {e}")
+
+    # ---------------------------------------------------------
+    # 5. Ledger & Analytics Memory Instantiation
+    # ---------------------------------------------------------
+    print("\n[5] Verifying Ledger & Intelligencia Memory Arrays...")
+    try:
+        import ledger
+        assert isinstance(ledger.mfe_tracker, dict)
+        assert isinstance(ledger.entry_intelligence, dict) # NEW: Checking Intelligencia memory
+        print("  ✔️ All state memory trackers instantiated correctly.")
+    except Exception as e:
+        print(f"  ❌ Ledger memory initialization failed: {e}")
+
+    # ---------------------------------------------------------
+    # 6. Intelligencia Data Output Validation
+    # ---------------------------------------------------------
+    print("\n[6] Testing Intelligencia Snapshot Engine...")
+    try:
+        from analytics.intelligencia import get_entry_intelligence
+        # Run a test snapshot. Because MT5 isn't connected, it should gracefully return defaults.
+        dummy_snapshot = get_entry_intelligence("EURUSDm")
+        assert isinstance(dummy_snapshot, dict), "Snapshot must return a dictionary"
+        assert "Macro_DXY_Proxy" in dummy_snapshot, "Missing DXY proxy key"
+        assert "H1_ATR_State" in dummy_snapshot, "Missing ATR state key"
+        assert dummy_snapshot["Session"] in ["ASIAN", "LONDON_OPEN", "LON_NY_OVERLAP", "NEW_YORK", "LATE_NY_ASIAN"], "Session routing failed"
+        print("  ✔️ Intelligencia engine output structure and fallbacks validated.")
+    except Exception as e:
+        print(f"  ❌ Analytics engine failed: {e}")
+
+    print("\n==================================================")
+    print(" DIAGNOSTICS COMPLETE: Framework is structurally sound.")
+    print("==================================================")
+
+if __name__ == "__main__":
+    run_diagnostics()
+--- trade_manager.py ---
+"""
+==================================================================
+                 CAB MASTER - TRADE MANAGER
+==================================================================
+Monitors active positions, updates MFE/MAE state memory,
+handles trailing stops, executes protective trade closures,
+and records the Market Intelligencia snapshot upon entry.
+==================================================================
+"""
+
+import MetaTrader5 as mt5
+import time
+import logging
+import config
+from utils import _get_filling_mode
+import ledger
+from signals import check_h4_inversion, check_h1_structural_breach
+from analytics.intelligencia import get_entry_intelligence
+
+def _close_position(pos, reason: str) -> bool:
+    """Closes an active position and triggers ledger audit."""
+    tick = mt5.symbol_info_tick(pos.symbol)
+    if tick is None: 
+        return False
+        
+    exit_price = tick.bid if pos.type == 0 else tick.ask
+    
+    req = {
+        "action": mt5.TRADE_ACTION_DEAL, 
+        "position": pos.ticket, 
+        "symbol": pos.symbol,
+        "volume": pos.volume, 
+        "type": mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY,
+        "price": exit_price, 
+        "deviation": 20, 
+        "magic": config.MAGIC_NUMBER,
+        "comment": reason[:31], 
+        "type_time": mt5.ORDER_TIME_GTC, 
+        "type_filling": _get_filling_mode(pos.symbol)
+    }
+    
+    res = mt5.order_send(req)
+    if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+        logging.info(f"KILLED #{pos.identifier} [{pos.symbol}] | Reason: {reason}")
+        ledger.write_to_performance_ledger(pos, reason, exit_price)
+        if pos.identifier in ledger.tracked_ids:
+            ledger.tracked_ids.remove(pos.identifier)
+        return True
+    return False
+
+def _modify_sl(pos, new_sl: float) -> bool:
+    """Modifies the stop loss for an active position."""
+    sym_info = mt5.symbol_info(pos.symbol)
+    if sym_info is None: 
+        return False
+        
+    req = {
+        "action": mt5.TRADE_ACTION_SLTP, 
+        "position": pos.ticket, 
+        "sl": round(new_sl, sym_info.digits), 
+        "tp": 0.0
+    }
+    res = mt5.order_send(req)
+    return res is not None and res.retcode == mt5.TRADE_RETCODE_DONE
+
+def manage_open_trades() -> None:
+    """Main loop for updating trade states, trailing stops, and protective checks."""
+    positions = mt5.positions_get()
+    active_ids = [p.identifier for p in positions if p.magic == config.MAGIC_NUMBER] if positions else []
+
+    # Sync any trades that were closed by the broker (SL/TP) before processing active ones
+    ledger.sync_broker_closed_positions(active_ids)
+
+    if not positions: 
+        return
+
+    for pos in positions:
+        if pos.magic != config.MAGIC_NUMBER or pos.symbol not in config.SYMBOLS: 
+            continue
+        
+        pos_id = pos.identifier
+        ledger.tracked_ids.add(pos_id) 
+        is_buy = (pos.type == 0)
+        
+        tick = mt5.symbol_info_tick(pos.symbol)
+        if tick is None: 
+            continue
+            
+        current_price = tick.bid if is_buy else tick.ask
+
+        # 1. Establish Risk Distance & Capture Entry Intelligencia Snapshot
+        if pos_id not in ledger.entry_risk:
+            dist = abs(pos.price_open - pos.sl)
+            if dist > 0: 
+                ledger.entry_risk[pos_id] = dist
+                
+                # --- NEW: TRIGGER INTELLIGENCIA SNAPSHOT ---
+                if pos_id not in ledger.entry_intelligence:
+                    ledger.entry_intelligence[pos_id] = get_entry_intelligence(pos.symbol)
+            else: 
+                continue
+            
+        risk_dist = max(ledger.entry_risk[pos_id], 0.00001)
+        price_move = (current_price - pos.price_open) if is_buy else (pos.price_open - current_price)
+        current_r = price_move / risk_dist
+
+        # 2. Update MFE and MAE State Memory
+        if pos_id not in ledger.mfe_tracker: ledger.mfe_tracker[pos_id] = current_price
+        if pos_id not in ledger.mae_tracker: ledger.mae_tracker[pos_id] = current_price
+        
+        if is_buy:
+            if current_price > ledger.mfe_tracker[pos_id]: ledger.mfe_tracker[pos_id] = current_price
+            if current_price < ledger.mae_tracker[pos_id]: ledger.mae_tracker[pos_id] = current_price
+        else:
+            if current_price < ledger.mfe_tracker[pos_id]: ledger.mfe_tracker[pos_id] = current_price
+            if current_price > ledger.mae_tracker[pos_id]: ledger.mae_tracker[pos_id] = current_price
+
+        # 3. Protective Sentinel Checks
+        hours_open = (time.time() - pos.time) / 3600.0
+
+        h4_signal = check_h4_inversion(pos.symbol)
+        if (is_buy and h4_signal == "BEARISH") or (not is_buy and h4_signal == "BULLISH"):
+            _close_position(pos, "OPP_H4_SIGNAL")
+            continue
+
+        # Data-backed 6h suppression for chop noise
+        if hours_open >= 6.0:
+            if check_h1_structural_breach(pos.symbol, is_buy):
+                _close_position(pos, "H1_STRUCT_BREACH")
+                continue
+
+        if hours_open >= config.STAGNATION_HOURS and current_r < 0.5:
+            _close_position(pos, "STAGNATION_DECAY")
+            continue
+
+        # 4. Trailing Stop Execution
+        updated_best = ledger.mfe_tracker[pos_id]
+        if is_buy:
+            new_sl = updated_best - risk_dist
+            if new_sl > pos.sl: 
+                _modify_sl(pos, new_sl)
+        else:
+            new_sl = updated_best + risk_dist
+            if new_sl < pos.sl and pos.sl > 0: 
+                _modify_sl(pos, new_sl)
+--- utils.py ---
+"""
+==================================================================
+                     CAB MASTER - UTILITIES
+==================================================================
+Math engine, technical indicators, lot sizing, and broker metadata.
+==================================================================
+"""
+
+import MetaTrader5 as mt5
+import pandas as pd
+import numpy as np
+import config
+
+def get_atr(symbol: str, timeframe, period: int = 14) -> float | None:
+    """Calculates True Range and returns rolling ATR value."""
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, period + 1)
+    if rates is None or len(rates) < period + 1:
+        return None
+    df = pd.DataFrame(rates)
+    df['tr'] = np.maximum(
+        df['high'] - df['low'],
+        np.maximum(
+            abs(df['high'] - df['close'].shift(1)),
+            abs(df['low'] - df['close'].shift(1))
+        )
+    )
+    return df['tr'].rolling(window=period).mean().iloc[-1]
+
+def calculate_lot(symbol: str, sl_dist_price: float, risk_percent: float) -> float:
+    """Calculates risk-adjusted position lot size matching broker constraints."""
+    account = mt5.account_info()
+    sym_info = mt5.symbol_info(symbol)
+    if account is None or sym_info is None or sl_dist_price <= 0:
+        return 0.01
+        
+    risk_money = account.equity * (risk_percent / 100.0)
+    tick_val = sym_info.trade_tick_value
+    tick_size = sym_info.trade_tick_size
+    
+    if tick_val <= 0:
+        return 0.01
+        
+    raw_lot = risk_money / ((sl_dist_price / tick_size) * tick_val)
+    step = sym_info.volume_step
+    lot = round(raw_lot / step) * step
+    return max(sym_info.volume_min, min(sym_info.volume_max, lot))
+
+def _get_filling_mode(symbol: str) -> int:
+    """Detects supported broker order filling execution mode."""
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        return mt5.ORDER_FILLING_RETURN
+    fill = info.filling_mode
+    if fill & 1:
+        return mt5.ORDER_FILLING_FOK
+    if fill & 2:
+        return mt5.ORDER_FILLING_IOC
+    return mt5.ORDER_FILLING_RETURN

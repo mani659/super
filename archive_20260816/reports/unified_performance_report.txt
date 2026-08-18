@@ -1,0 +1,38 @@
+======================================================================
+        UNIFIED FRAMEWORK RUNNER METRICS AUDIT REPORT
+  Generated On: 2026-05-18 19:31:10
+  Target Active Session Checked: 2026-05-18 (TODAY)
+======================================================================
+
+--- 1. CURRENT SESSION TRADING PERFORMANCE (2026-05-18) ---
+  ▶ Ghost Sniper Strategy Direct Fills:
+      ↳ Magic 201 (SCALP): 92 Fills [SELL: 92]
+      ↳ Magic 202 (REVERSAL): 77 Fills [SELL: 77]
+      ↳ Magic 203 (TREND_FOLLOW): 1 Fills [BUY: 1]
+
+  ▶ Structural Runner Actions Checked:
+      ↳ CAB Engine triggered 3 lifecycle event(s).
+      ↳ GHOST Engine triggered 223 lifecycle event(s).
+      ↳ UNIFIED Engine triggered 1169 lifecycle event(s).
+
+  🚫 SILENT MODULES (Zero execution footprints detected today):
+      • Ghost_Sniper_GhostCache (Magic: 204)
+      • SuperTrend_EURUSD (Magic: 101234)
+      • SuperTrend_GBPUSD (Magic: 201567)
+      • SuperTrend_XAUUSD (Magic: 301890)
+      • SuperTrend_XAGUSD (Magic: 401213)
+--------------------------------------------------
+
+--- 2. HISTORICAL OVERALL PERFORMANCE SUMMARY (ALL LOG DATA) ---
+  ▶ Ghost_Sniper_Scalp (Magic: 201):
+      ↳ Total Positions Executed Historically : 92
+      ↳ Logged Stop Loss Hard-Hits          : 92
+      ↳ Logged Take Profit Targets Hit      : 0
+  ▶ Ghost_Sniper_Reversal (Magic: 202):
+      ↳ Total Positions Executed Historically : 77
+      ↳ Logged Stop Loss Hard-Hits          : 77
+      ↳ Logged Take Profit Targets Hit      : 0
+  ▶ Ghost_Sniper_TrendFollow (Magic: 203):
+      ↳ Total Positions Executed Historically : 1
+      ↳ Logged Stop Loss Hard-Hits          : 1
+      ↳ Logged Take Profit Targets Hit      : 0

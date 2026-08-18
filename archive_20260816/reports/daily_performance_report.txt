@@ -1,0 +1,68 @@
+============================================================
+ AUTOMATED MT5 FRAMEWORK PERFORMANCE REPORT 
+ Generated: 2026-05-18 19:08:46 
+ Target Date (Previous Day): 2026-05-17 
+============================================================
+
+--- 1. PREVIOUS DAY ACTIVITY SUMMARY ---
+Cycles/Heartbeats Recorded Yesterday:
+  - cab_watcher.log: 20146 cycles
+  - supertrend_EURUSDm.log: 2878 cycles
+  - supertrend_GBPUSDm.log: 2878 cycles
+  - supertrend_runner.log: 2878 cycles
+  - supertrend_XAGUSDm.log: 5756 cycles
+  - supertrend_XAUUSDm.log: 5756 cycles
+
+Trade Fills Recorded Yesterday:
+  None found.
+
+Stops/SL Events Recorded Yesterday:
+  None found.
+
+--- 2. CRITICAL SYSTEM EVENTS (ALL TIME) ---
+
+A. Critical Errors/Exceptions (251 found)
+  [supertrend_XAGUSDm.log:9548] 2026-05-14 04:20:14,906 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10016 | Invalid stops
+  [supertrend_XAGUSDm.log:9553] 2026-05-14 04:20:44,926 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10016 | Invalid stops
+  [supertrend_XAGUSDm.log:9558] 2026-05-14 04:21:14,949 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10016 | Invalid stops
+  [supertrend_XAGUSDm.log:9563] 2026-05-14 04:21:44,933 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10016 | Invalid stops
+  [supertrend_XAGUSDm.log:9568] 2026-05-14 04:22:14,953 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10016 | Invalid stops
+  [supertrend_XAGUSDm.log:9578] 2026-05-14 04:23:14,984 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9583] 2026-05-14 04:23:44,986 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9588] 2026-05-14 04:24:14,985 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9593] 2026-05-14 04:24:50,876 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9598] 2026-05-14 04:25:15,041 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9603] 2026-05-14 04:25:45,061 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9608] 2026-05-14 04:26:15,057 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9613] 2026-05-14 04:26:45,107 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9618] 2026-05-14 04:27:15,084 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9623] 2026-05-14 04:27:45,096 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9628] 2026-05-14 04:28:15,109 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9633] 2026-05-14 04:28:45,147 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9638] 2026-05-14 04:29:15,144 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAGUSDm.log:9643] 2026-05-14 04:29:45,138 [XAGUSDm] [ERROR] SL FAILED #1615345537 (INCUBATING_FLOOR) | code=10025 | No changes
+  [supertrend_XAUUSDm.log:3560] 2026-05-13 09:02:21,709 [XAUUSDm] [ERROR] Failed to get M30 rates
+
+B. Grid Deadlocks (402 found)
+  [sniper_brain.log:383] 2026-05-18 19:08:43,892 | GRID: depth cap reached (4 legs) — ticket=1637692739 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:384] 2026-05-18 19:08:43,897 | GRID: depth cap reached (4 legs) — ticket=1638090296 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:385] 2026-05-18 19:08:43,897 | GRID: depth cap reached (4 legs) — ticket=1638090378 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:386] 2026-05-18 19:08:43,897 | GRID: depth cap reached (4 legs) — ticket=1638134539 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:387] 2026-05-18 19:08:43,897 | GRID: depth cap reached (4 legs) — ticket=1638134617 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:388] 2026-05-18 19:08:45,912 | GRID: depth cap reached (4 legs) — ticket=1637088700 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:389] 2026-05-18 19:08:45,912 | GRID: depth cap reached (4 legs) — ticket=1637088873 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:390] 2026-05-18 19:08:45,912 | GRID: depth cap reached (4 legs) — ticket=1637250176 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:391] 2026-05-18 19:08:45,912 | GRID: depth cap reached (4 legs) — ticket=1637250965 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:392] 2026-05-18 19:08:45,912 | GRID: depth cap reached (4 legs) — ticket=1637380996 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:393] 2026-05-18 19:08:45,912 | GRID: depth cap reached (4 legs) — ticket=1637381051 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:394] 2026-05-18 19:08:45,912 | GRID: depth cap reached (4 legs) — ticket=1637392014 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:395] 2026-05-18 19:08:45,912 | GRID: depth cap reached (4 legs) — ticket=1637392084 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:396] 2026-05-18 19:08:45,928 | GRID: depth cap reached (4 legs) — ticket=1637564627 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:397] 2026-05-18 19:08:45,928 | GRID: depth cap reached (4 legs) — ticket=1637643612 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:398] 2026-05-18 19:08:45,928 | GRID: depth cap reached (4 legs) — ticket=1637692739 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:399] 2026-05-18 19:08:45,928 | GRID: depth cap reached (4 legs) — ticket=1638090296 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:400] 2026-05-18 19:08:45,928 | GRID: depth cap reached (4 legs) — ticket=1638090378 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:401] 2026-05-18 19:08:45,928 | GRID: depth cap reached (4 legs) — ticket=1638134539 REFUSED. No new legs until grid closes.
+  [sniper_brain.log:402] 2026-05-18 19:08:45,928 | GRID: depth cap reached (4 legs) — ticket=1638134617 REFUSED. No new legs until grid closes.
+
+C. Deferred/Blocked Actions (0 found)

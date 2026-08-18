@@ -1,0 +1,16 @@
+cab_master/
+│
+├── config.py           # Centralized settings, parameters & path configurations
+├── connection.py       # MT5 connection, health checks & heartbeat engine
+├── utils.py            # Math helpers, ATR indicators, lot-sizing & filling mode
+├── ledger.py           # Performance auditor, CSV recording & MFE/MAE state tracking
+│
+├── analytics/          # [FUTURE] Market Intelligencia Hub
+│   ├── __init__.py
+│   └── intelligencia.py# Multi-pair correlation, DXY metrics & market regime filters
+│
+├── signals.py          # Entry/Exit signals (H4 Inversion & H1 Structural Breach)
+├── trade_manager.py    # Active trade management, trailing SL & stagnation decay
+├── execution.py        # Order placement, broker communication & trade entry
+│
+└── main.py             # Central brain orchestrator & runtime loop

@@ -1,0 +1,162 @@
+{
+  "cutoff": "2026-08-15 01:29:16.543297",
+  "days": 1,
+  "brain": {
+    "lines_total": 4571,
+    "lines_window": 83,
+    "event_counts": {
+      "LEG_ADDED": 72,
+      "GRIDSTATE_RESET": 11
+    },
+    "grid_tp_r_stats": {
+      "n": 0
+    },
+    "grid_stop_r_stats": {
+      "n": 0
+    },
+    "protector_r_stats": {
+      "n": 0
+    },
+    "be_lock_by_magic": {},
+    "leg_tp_set_by_magic": {},
+    "ghost_cache_layer_depths": [],
+    "trend_gone_r_stats": {
+      "n": 0
+    },
+    "leg_tp_set_total": 0,
+    "grid_exits_total": 0,
+    "grid_tp_rate": null
+  },
+  "session": {
+    "rows_total": 328145,
+    "rows_window": 51147,
+    "regime_counts": {
+      "UNKNOWN": 44214,
+      "RANGING": 383,
+      "STABLE": 5163
+    },
+    "circuit_breaker_trips": [],
+    "magic_isolation_breach_count": 0,
+    "isolation_details": [],
+    "r_stats_by_bot": {
+      "unified": {
+        "n": 1387,
+        "avg": 0.0003,
+        "min": 0.0001,
+        "max": 0.0007,
+        "win_pct": 100.0
+      }
+    }
+  },
+  "ghost_audit": {
+    "rows_total": 826,
+    "rows_window": 0,
+    "fills_by_magic": {},
+    "gate_blocks_by_magic": {},
+    "sessions": {},
+    "conviction_at_fill_by_magic": {},
+    "adx_at_fill_by_magic": {},
+    "no_sl_fills": 0,
+    "total_fills": 0,
+    "no_sl_rate_pct": 0.0
+  },
+  "ghost_conviction": null,
+  "cab": {
+    "lines_total": 288156,
+    "lines_window": 176654,
+    "event_counts": {},
+    "regime_by_symbol": {},
+    "reaper_r_stats": {
+      "n": 0
+    },
+    "protector_r_stats": {
+      "n": 0
+    },
+    "harvester_r_stats": {
+      "n": 0
+    },
+    "reaper_false_cut_rate_note": "Cannot compute without closed-trade P&L \u2014 use MT5 trade history export"
+  },
+  "supertrend": {
+    "AUDNZDm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "BTCUSDm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "ETHUSDm": {
+      "lines_window": 4589,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "EURGBPm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "EURUSDm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "GBPUSDm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "USDJPYm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "USOILm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "USTECm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "XAGUSDm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    },
+    "XAUUSDm": {
+      "lines_window": 5548,
+      "event_counts": {},
+      "r_stats": {
+        "n": 0
+      }
+    }
+  },
+  "runner": {
+    "HEARTBEAT_OK": 1387
+  }
+}

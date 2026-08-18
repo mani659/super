@@ -1,0 +1,3937 @@
+
+--- unified_runner.py ---
+"""
+unified_runner.py — Unified Bot Runner
+=======================================
+Task: pu-runner (Session 1 — CRITICAL)
+
+Runs all three bots through a single MT5 connection via MT5Gateway.
+
+THREAD ARCHITECTURE:
+    Thread 0  main       60s equity heartbeat + health monitor
+    Thread 1  SuperTrend 30s cycle (M30 strategy — no rush)
+    Thread 2  Ghost      1s  cycle (M1 hunter — needs fast loop)
+    Thread 3  CAB        15s cycle (position watcher)
+
+All threads share one MT5Gateway instance. The gateway's internal
+threading.Lock serialises every MT5 API call — no other locking needed
+at the runner level.
+
+DEMO MODE (enabled by default):
+    - SuperTrend equity_filter_enabled = False  (no pause on drawdown)
+    - No global position cap enforced           (watch everything)
+    - Ghost daily_pairs cap = 999               (effectively unlimited)
+    - No spread abort on Ghost hunter fire      (log SKIP_SPREAD, don't abort)
+    See DEMO_MODE flag below — set False before going live.
+
+UNIFIED SESSION LOG:
+    One CSV row per action across all bots. Columns:
+        timestamp | bot | action | symbol | magic | r_multiple |
+        regime | conviction | virtual_layer_depth
+    Written by log_session_event() — callable from any bot thread.
+    Thread-safe via a dedicated csv_lock (separate from MT5 lock).
+
+MAGIC NUMBER ISOLATION:
+    SuperTrend : 101234, 201567, 301890, 401213
+    Ghost Grid  : 201, 202, 204  (203 removed — trend-follow handed to SuperTrend)
+    CAB Watcher : 999555
+    Each bot only manages its own magic numbers. Verified in smoke test.
+
+STARTUP SEQUENCE:
+    1. MT5Gateway.initialize() + login()
+    2. Start Ghost thread  (fastest loop — start first)
+    3. Start CAB thread
+    4. Start SuperTrend thread
+    5. Main thread enters equity heartbeat loop
+    6. KeyboardInterrupt → shutdown flag → all threads exit cleanly
+
+USAGE:
+    python unified_runner.py [--demo] [--account demo|live]
+    python unified_runner.py --help
+"""
+
+import csv
+import json
+import logging
+import logging.handlers
+import os
+import sys
+import threading
+import time
+import argparse
+from datetime import datetime
+from pathlib import Path
+
+# ── Gateway import ────────────────────────────────────────────────────────────
+from mt5_gateway import MT5Gateway
+from core.knowledge_register import KnowledgeRegister
+from core.shared_intelligence import MarketPulseEngine
+from core.kpi_ledger import write_kpi_snapshot
+
+# ── Conditional bot imports (graceful on missing deps for testing) ─────────────
+try:
+    from core.supertrend_bot import SuperTrendBot, Config as STConfig, MultiPairRunner
+    SUPERTREND_AVAILABLE = True
+except Exception as _st_err:
+    SUPERTREND_AVAILABLE = False
+    import logging as _l
+    _l.getLogger("UnifiedRunner").warning(
+        f"SuperTrend import failed: {_st_err} — "
+        f"install missing deps: pip install TA-Lib scikit-learn"
+    )
+
+# Ghost and CAB modules are imported inside their thread functions
+# so set_gateway() can be called immediately after import.
+# CAB uses importlib because the filename contains a hyphen.
+GHOST_HUNTER_AVAILABLE  = True   # checked at thread startup
+GHOST_WATCHER_AVAILABLE = True
+CAB_AVAILABLE           = True
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  CONFIGURATION
+# ──────────────────────────────────────────────────────────────────────────────
+
+DEMO_MODE = True          # Set False before live deployment (Phase 5)
+
+SUPERTREND_INTERVAL  = 30    # seconds between ST cycles
+GHOST_INTERVAL       = 1     # seconds between Ghost hunter ticks
+CAB_INTERVAL         = 15    # seconds between CAB watcher cycles
+CAB_ENTRY_INTERVAL   = 30    # seconds between CAB entry checks (H4 — no rush)
+HEARTBEAT_INTERVAL   = 60    # seconds between main-thread health checks
+MAX_GLOBAL_POSITIONS = 30    # fix 5: Circuit Breaker Blindspot (max system open positions)
+
+SESSION_LOG_FILE     = "unified_session_log.csv"
+LOG_FILE             = "unified_runner.log"
+
+# fix-regimegate (Tier 3 #6): Ghost Grid is a mean-reversion strategy — the
+# regime complementarity map has always said it should be active in
+# RANGING/STABLE and stand down in TRENDING, but the actual probe-arming
+# logic in ghost_hunter_thread() had no regime check at all before this fix;
+# only the 202/203 *leg* gates were regime/conviction-aware, not the decision
+# to arm a probe in the first place. UNKNOWN is blocked too — that means the
+# M1 regime engine hasn't got enough data yet (cold start), which is not a
+# state we want to be opening new probes in either.
+GHOST_ARM_BLOCKED_REGIMES = {"TRENDING_UP", "TRENDING_DOWN", "UNKNOWN"}
+
+# Magic number registry — used by isolation check
+def _load_supertrend_magics():
+    try:
+        import json
+        from pathlib import Path
+        cfg_path = Path(__file__).parent / "config" / "config.json"
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        m = {int(v["magic_number"]) for v in data.get("symbols", {}).values() if "magic_number" in v}
+        return m if m else {101234, 201567, 301890, 401213}
+    except Exception:
+        return {101234, 201567, 301890, 401213}
+
+MAGIC_SUPERTREND = _load_supertrend_magics()
+MAGIC_GHOST      = {201, 202, 204}
+MAGIC_CAB        = {999555}
+ALL_MAGIC        = MAGIC_SUPERTREND | MAGIC_GHOST | MAGIC_CAB
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  LOGGING
+# ──────────────────────────────────────────────────────────────────────────────
+
+def setup_logging(level: str = "INFO"):
+    """
+    Two-level logging:
+      File (logs/unified_runner.log) : INFO+ — full detail for post-analysis
+      Console (stdout)               : WARNING+ — errors and key events only
+    Gate evaluations every 1s, regime cycles, cache hits go to file only.
+    """
+    Path("logs").mkdir(exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s | %(message)s")
+
+    # File handler: full INFO detail
+    fh = logging.handlers.RotatingFileHandler(
+        f"logs/{LOG_FILE}", maxBytes=5*1024*1024, backupCount=5, encoding="utf-8"
+    )
+    fh.setFormatter(fmt)
+    fh.setLevel(logging.INFO)
+
+    # Console handler: WARNING+ only
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(message)s"))
+    ch.setLevel(logging.WARNING)
+
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(fh)
+    root.addHandler(ch)
+
+    # Suppress noisy per-tick loggers from console (still go to file)
+    for noisy in ["hunter", "brain"]:
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+logger = logging.getLogger("UnifiedRunner")
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  UNIFIED SESSION LOG
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  RUNTIME SWITCHES  (fix-switches, Tier 3 #7)
+# ──────────────────────────────────────────────────────────────────────────────
+# Re-read from config.json on every call rather than cached at startup — this
+# is what makes it a live toggle instead of a redeploy. The file read is a few
+# hundred bytes and happens at most once per thread cycle (1s-30s depending on
+# thread), which is negligible next to the MT5 API calls each cycle already
+# makes. Defaults are all-enabled and fail open to all-enabled on any error —
+# a switches bug should never be the thing that silently stops managing an
+# open position; that failure mode is exactly what fix-cabsym addressed above.
+
+_DEFAULT_SWITCHES = {
+    "supertrend_enabled": True,
+    "cab_enabled": True,
+    # 203 removed — trend-follow handed off to SuperTrend bot
+    "ghost_grid": {"201": True, "202": True, "204": True},
+}
+
+
+def load_switches(config_path: str) -> dict:
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            data = json.load(f)
+        sw = data.get("switches", {})
+        return {
+            "supertrend_enabled": bool(sw.get("supertrend_enabled", True)),
+            "cab_enabled": bool(sw.get("cab_enabled", True)),
+            # 203 removed — load_switches no longer exposes a 203 key
+            "ghost_grid": {
+                "201": bool(sw.get("ghost_grid", {}).get("201", True)),
+                "202": bool(sw.get("ghost_grid", {}).get("202", True)),
+                "204": bool(sw.get("ghost_grid", {}).get("204", True)),
+            },
+        }
+    except Exception as e:
+        logging.getLogger("UnifiedRunner").warning(
+            f"load_switches: could not read {config_path} ({e}) — "
+            f"defaulting to all-enabled"
+        )
+        return dict(_DEFAULT_SWITCHES)
+
+
+SESSION_LOG_HEADER = [
+    "timestamp", "bot", "action", "symbol", "magic",
+    "r_multiple", "regime", "conviction", "virtual_layer_depth",
+]
+_csv_lock = threading.Lock()
+
+
+def _init_session_log():
+    if not os.path.isfile(SESSION_LOG_FILE):
+        with open(SESSION_LOG_FILE, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(SESSION_LOG_HEADER)
+
+
+def log_session_event(
+    bot: str,
+    action: str,
+    symbol: str = "",
+    magic: int = 0,
+    r_multiple: float = None,
+    regime: str = "",
+    conviction: float = None,
+    virtual_layer_depth: int = None,
+):
+    """
+    Write one row to the unified session log.
+    Thread-safe — uses dedicated csv_lock (independent of MT5 lock).
+
+    bot    : "supertrend" | "ghost" | "cab"
+    action : e.g. "BUY_ENTRY", "SELL_ENTRY", "CLOSE_DEAD", "REAPER",
+             "HARVESTER", "PROTECTOR", "GRID_TP", "GRID_STOP",
+             "GHOST_CACHE_FIRE", "IDLE"
+    """
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    row = [
+        ts, bot, action, symbol, magic or "",
+        f"{r_multiple:.4f}" if r_multiple is not None else "",
+        regime,
+        f"{conviction:.2f}" if conviction is not None else "",
+        virtual_layer_depth if virtual_layer_depth is not None else "",
+    ]
+    with _csv_lock:
+        for _attempt in range(3):
+            try:
+                with open(SESSION_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+                    csv.writer(f).writerow(row)
+                break
+            except PermissionError:
+                if _attempt < 2:
+                    time.sleep(0.1)   # brief wait — viewer may release lock
+                else:
+                    logger.debug(
+                        f"Session log locked — skipping row "
+                        f"(close the CSV in any viewer)"
+                    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  SHARED STATE  (read by main thread heartbeat, written by bot threads)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SharedState:
+    """
+    Lightweight in-memory store replacing brain_state_live.csv IPC.
+    Ghost Hunter reads market state here instead of from a CSV file.
+    Written by Ghost Watcher thread; read by Ghost Hunter thread.
+    Protected by a simple RLock (readers/writers are infrequent).
+
+    Also carries the daily equity circuit breaker flag (arch-equity-cb).
+    All bot threads read entries_allowed before opening new positions.
+    The main thread writes it based on daily drawdown vs max_daily_loss_percent.
+    """
+    def __init__(self):
+        self._lock = threading.RLock()
+        self.conviction:  float = 50.0
+        self.adx:         float = 0.0
+        self.atr:         float = 0.0
+        self.regime:      str   = "UNKNOWN"
+        self.updated_at:  float = 0.0
+        # Adaptive thresholds (replace adaptive_thresholds_live.csv)
+        self.adaptive: dict = {}
+        # ── arch-equity-cb: daily circuit breaker ─────────────────────────────
+        # Set False by main thread when daily drawdown exceeds threshold.
+        # All bot threads check this before opening new positions.
+        # Resets to True at session start (each run of unified_runner).
+        self.entries_allowed:   bool  = True
+        self.daily_start_equity: float = 0.0   # sampled once at startup
+        self.cb_fired_at:        float = 0.0   # timestamp when CB fired
+        self.cb_reason:          str   = ""
+
+    def update_market_state(self, conviction, adx, atr, regime):
+        with self._lock:
+            self.conviction = conviction
+            self.adx        = adx
+            self.atr        = atr
+            self.regime     = regime
+            self.updated_at = time.time()
+
+    def get_market_state(self) -> dict:
+        with self._lock:
+            return {
+                "conviction": self.conviction,
+                "adx":        self.adx,
+                "atr":        self.atr,
+                "regime":     self.regime,
+                "updated_utc": datetime.utcfromtimestamp(
+                    self.updated_at
+                ).strftime("%Y-%m-%d %H:%M:%S") if self.updated_at else "",
+            }
+
+    def update_adaptive(self, thresholds: dict):
+        with self._lock:
+            self.adaptive = dict(thresholds)
+
+    def get_adaptive(self) -> dict:
+        with self._lock:
+            return dict(self.adaptive)
+
+    # ── arch-equity-cb: circuit breaker interface ──────────────────────────
+    def set_daily_start_equity(self, equity: float):
+        with self._lock:
+            self.daily_start_equity = equity
+
+    def trip_circuit_breaker(self, reason: str):
+        """Called by main thread when drawdown exceeds threshold."""
+        with self._lock:
+            if self.entries_allowed:   # log transition once only
+                self.entries_allowed = False
+                self.cb_fired_at     = time.time()
+                self.cb_reason       = reason
+
+    def reset_circuit_breaker(self):
+        """Call at start of new session (new day). Not auto-reset — deliberate."""
+        with self._lock:
+            self.entries_allowed    = True
+            self.daily_start_equity = 0.0
+            self.cb_fired_at        = 0.0
+            self.cb_reason          = ""
+
+    def check_entries_allowed(self) -> bool:
+        with self._lock:
+            return self.entries_allowed
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  SHUTDOWN COORDINATOR
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ShutdownEvent:
+    """Simple wrapper so threads can check a shared stop signal."""
+    def __init__(self):
+        self._event = threading.Event()
+
+    def request(self):
+        self._event.set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def wait(self, timeout: float = None):
+        self._event.wait(timeout)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  BOT THREAD WRAPPERS
+#  Each wrapper is a function that loops independently.
+#  They receive the shared gateway and stop_event.
+#  In the current phase the bots have their own MT5 connections (legacy);
+#  Session 2 will port them to use gateway.X() calls instead.
+#  For now the wrappers simply invoke the existing entry points and allow
+#  the unified runner to control the lifecycle.
+# ──────────────────────────────────────────────────────────────────────────────
+
+def supertrend_thread(gateway: MT5Gateway, shared: SharedState,
+                      stop: ShutdownEvent, config_path: str,
+                      account: dict, demo: bool):
+    """
+    SuperTrend wrapper — runs MultiPairRunner.run_cycle_all() every
+    SUPERTREND_INTERVAL seconds until stop is requested.
+
+    In demo mode equity_filter_enabled=False so drawdown doesn't pause entries.
+    Once pu-st-port is complete, this thread will use gateway directly.
+    Until then it relies on SuperTrend's own MT5 initialisation.
+    """
+    log = logging.getLogger("Thread.SuperTrend")
+    log.info("SuperTrend thread starting")
+
+    if not SUPERTREND_AVAILABLE:
+        log.warning("SuperTrend module not importable — thread exiting")
+        return
+
+    try:
+        import MetaTrader5 as mt5
+        with open(config_path) as f:
+            config_data = json.load(f)
+        symbols = list(config_data.get("symbols", {}).keys())
+        gs      = config_data.get("global_settings", {})
+
+        bots = []
+        for sym in symbols:
+            sym_cfg = config_data["symbols"][sym]
+            cfg = STConfig(
+                symbol=sym,
+                magic_number=sym_cfg.get("magic_number", 123456),
+                risk_percent=sym_cfg.get("risk_percent", 1.0),
+                max_positions=gs.get("max_positions_per_symbol", 4),  # arch-cap-st
+                session_gate_enabled=True,
+                conviction_gate_enabled=False,   # observation mode
+                use_m15_atr_for_sl_buffer=True,
+                si_weight_cluster=sym_cfg.get("si_weight_cluster", 0.40),
+                si_weight_regime=sym_cfg.get("si_weight_regime", 0.25),
+                si_weight_adx=sym_cfg.get("si_weight_adx", 0.20),
+                si_weight_volume=sym_cfg.get("si_weight_volume", 0.15),
+                max_lot_demo_cap=gs.get("st_max_lot_demo_cap", 0.01),
+            )
+            bot = SuperTrendBot(cfg, gateway=gateway)
+            bot.is_connected = True
+            bots.append(bot)
+
+        runner = MultiPairRunner(
+            bots=bots,
+            interval_seconds=SUPERTREND_INTERVAL,
+            # arch-global-cap: global cap removed. Per-symbol max_positions=4
+            # on each bot already bounds exposure. Global cap was double-counting
+            # protection and blocking uncorrelated cross-pair opportunities.
+            # Daily equity circuit breaker in main thread is the correct
+            # global safety mechanism — not a position count.
+            max_total_positions=999,
+            dry_run=False,
+            gateway=gateway
+        )
+
+        while not stop.is_set():
+            cycle_start = time.time()
+            try:
+                # arch-equity-cb: pass circuit breaker state to runner
+                # Watcher logic always runs — only new entries are blocked
+                # fix-switches: same principle — supertrend_enabled=False only
+                # blocks new entries, manage_open_positions still runs regardless
+                cb_allows = shared.check_entries_allowed()
+                switches  = load_switches(config_path)
+                pos_count = len(gateway.positions_get() or [])
+                allow_entries = cb_allows and switches["supertrend_enabled"] and pos_count < MAX_GLOBAL_POSITIONS
+                runner.run_cycle_all(circuit_breaker_allows=allow_entries)
+                log_session_event("supertrend", "CYCLE_COMPLETE",
+                                  regime=shared.get_market_state().get("regime", ""))
+            except Exception as e:
+                log.error(f"Cycle error: {e}", exc_info=True)
+            elapsed = time.time() - cycle_start
+            stop.wait(max(0, SUPERTREND_INTERVAL - elapsed))
+
+    except Exception as e:
+        log.error(f"SuperTrend thread fatal: {e}", exc_info=True)
+    finally:
+        log.info("SuperTrend thread stopped")
+
+
+def ghost_watcher_thread(gateway: MT5Gateway, shared: SharedState,
+                         stop: ShutdownEvent):
+    """
+    Ghost Watcher (Brain) wrapper — runs every HEARTBEAT_INTERVAL.
+    Writes market state to shared object instead of brain_state_live.csv.
+    (Full IPC replacement is pu-noipc in Session 2; this is the bridge.)
+    """
+    log = logging.getLogger("Thread.GhostWatcher")
+    log.info("Ghost Watcher thread starting")
+
+    if not GHOST_WATCHER_AVAILABLE:
+        log.warning("Ghost Watcher module not importable — thread exiting")
+        return
+
+    try:
+        import ghost_super.sniper_watcher as sw
+        sw.set_gateway(gateway)   # wire shared MT5 connection
+        log.warning("Ghost Watcher: gateway wired in")
+        while not stop.is_set():
+            try:
+                # Read market state and push to shared object
+                conviction, adx, atr, regime = sw.get_market_state()
+                shared.update_market_state(conviction, adx, atr, regime)
+
+                # Position management (the watcher's core job)
+                positions = gateway.positions_get(symbol=sw.SYMBOL)
+                if positions:
+                    # Change 5: Grid-level exits — 204 only (was missing from live thread)
+                    sw.manage_grid_logic(positions, conviction, adx, atr, regime)
+                    # Per-position dispatch (leg TP + BE-lock for 201/202/204)
+                    for pos in positions:
+                        manager = sw.MAGIC_MANAGERS.get(pos.magic)
+                        if manager:
+                            manager(pos, conviction, adx, atr, regime)
+
+                sw.compute_adaptive_thresholds()
+                shared.update_adaptive(sw.read_adaptive_thresholds())
+                log_session_event("ghost", "WATCHER_CYCLE", regime=regime,
+                                  conviction=conviction)
+            except Exception as e:
+                log.error(f"Watcher cycle error: {e}", exc_info=True)
+
+            # KR cleanup: unregister theses for positions broker closed via SL/TP
+            # Mirrors the pattern in cab_watcher.py manage_fluid_logic() stale cleanup
+            try:
+                all_ghost_positions = gateway.positions_get()
+                live_ghost_tickets = {
+                    p.ticket for p in (all_ghost_positions or [])
+                    if p.magic in {201, 202, 204}
+                }
+                from core.knowledge_register import KnowledgeRegister
+                kr_instance = KnowledgeRegister()
+                with kr_instance._lock:
+                    ghost_registered = {
+                        t for t, thesis in kr_instance._theses.items()
+                        if thesis and getattr(thesis, 'magic', None) in {201, 202, 204}
+                    }
+                broker_closed = ghost_registered - live_ghost_tickets
+                for ticket in broker_closed:
+                    kr_instance.unregister_trade_thesis(ticket)
+                    log.debug(f"KR cleanup: thesis #{ticket} unregistered (broker-closed)")
+            except Exception as _kr_e:
+                log.debug(f"KR cleanup scan error: {_kr_e}")
+
+            stop.wait(2)   # 2s pulse matching v3.1 heartbeat
+    except Exception as e:
+        log.error(f"Ghost Watcher thread fatal: {e}", exc_info=True)
+    finally:
+        log.info("Ghost Watcher thread stopped")
+
+
+def ghost_hunter_thread(gateway: MT5Gateway, shared: SharedState,
+                        stop: ShutdownEvent, demo: bool, config_path: str):
+    """
+    Ghost Hunter wrapper — tight 1s loop for probe detection.
+    Reads brain state from shared object (no CSV read).
+    """
+    log = logging.getLogger("Thread.GhostHunter")
+    log.info("Ghost Hunter thread starting")
+
+    if not GHOST_HUNTER_AVAILABLE:
+        log.warning("Ghost Hunter module not importable — thread exiting")
+        return
+
+    try:
+        import ghost_super.ghost_sniper as gh
+        # fix-204wire: this was missing entirely. ghost_cache.py is fully
+        # built and unit-tested (10/10 pass) but was never instantiated or
+        # updated anywhere in this thread, which is the actual live probe
+        # loop — the standalone gh.run_hunter() that DOES wire it in is not
+        # what runs under unified_runner. Result: magic 204 has fired zero
+        # times across the entire demo run, and Gate ② (204 vs 202) has had
+        # no data to evaluate. This import + the ARMED/update/reset wiring
+        # below brings the live thread in line with the reference design.
+        from ghost_super.ghost_cache import GhostCache, N_LAYERS_DEFAULT
+        gh.set_gateway(gateway)   # wire shared MT5 connection
+        log.warning("Ghost Hunter: gateway wired in")
+        import MetaTrader5 as mt5
+        from datetime import date
+
+        if demo:
+            gh.MAX_DAILY_PAIRS = 999
+
+        armed, break_level, probe_extreme = None, 0.0, 0.0
+        ghost_cache = None   # fix-204wire: tracks the active probe's virtual grid
+        daily_pairs = 0
+        today = date.today()
+
+        while not stop.is_set():
+            try:
+                # Daily reset
+                if date.today() != today:
+                    log.info(f"Daily reset: pairs_yesterday={daily_pairs}")
+                    daily_pairs, today = 0, date.today()
+
+                tick  = gateway.symbol_info_tick(gh.SYMBOL)
+                rates = gateway.copy_rates_from_pos(gh.SYMBOL, mt5.TIMEFRAME_M1, 0, 50)
+                if not tick or rates is None or len(rates) < 20:
+                    stop.wait(GHOST_INTERVAL)
+                    continue
+
+                import pandas as pd
+                df            = pd.DataFrame(rates)
+                atr           = gh._get_atr(df)
+                dynamic_step  = max(atr * gh.ATR_STEP_MULTIPLIER, gh.ATR_STEP_FLOOR)
+                current_price = (tick.bid + tick.ask) / 2
+                spread        = tick.ask - tick.bid
+
+                # Read brain state from shared (no CSV I/O)
+                bs    = shared.get_market_state()
+                gates = gh.apply_gates(bs)
+
+                # fix-switches: re-read every tick — cheap, and this is what
+                # makes it a live toggle instead of a redeploy
+                switches = load_switches(config_path)
+
+                if armed is None:
+                    # fix-regimegate: don't arm a new probe when the shared
+                    # regime read says conditions don't fit Ghost Grid's
+                    # mean-reversion premise. This only gates NEW arming —
+                    # an already-armed probe is left to run to its natural
+                    # exit even if regime drifts mid-probe; changing that too
+                    # is a bigger behavioral change than today's fix covers.
+                    current_regime = bs.get("regime", "UNKNOWN")
+                    if current_regime in GHOST_ARM_BLOCKED_REGIMES:
+                        stop.wait(GHOST_INTERVAL)
+                        continue
+
+                    recent_high = df["high"].iloc[-5:].max()
+                    recent_low  = df["low"].iloc[-5:].min()
+
+                    # F6 Cross-bot gate: block UP_PROBE when ST holds confirmed LONG
+                    st_long_active = False
+                    try:
+                        from core.knowledge_register import KnowledgeRegister
+                        kr = KnowledgeRegister()
+                        for thesis in kr._theses.values():
+                            if (thesis.symbol == "XAUUSDm" and 
+                                thesis.bot_id in ("SuperTrend", "ST") and
+                                thesis.direction == 1):
+                                st_long_active = True
+                                break
+                    except Exception:
+                        pass  # fail open — never block on KR read failure
+                    
+                    if gh.SYMBOL == "XAUUSDm" and st_long_active and current_price > recent_high:
+                        log.info(
+                            f"GHOST_ARM_BLOCKED_ST_LONG | "
+                            f"price={round(current_price,3)} | "
+                            f"ST LONG thesis active on XAUUSDm — suppressing UP_PROBE"
+                        )
+                        # Skip arming, continue loop
+                        stop.wait(1)
+                        continue
+
+                    if current_price > recent_high:
+                        armed, probe_extreme = "UP_PROBE", current_price
+                        break_level = current_price - dynamic_step
+                        ghost_cache = GhostCache(
+                            probe_direction="UP_PROBE",
+                            probe_origin=break_level,
+                            probe_extreme=current_price,
+                            atr_step=dynamic_step,
+                            n_layers=N_LAYERS_DEFAULT,
+                        )
+                        gh.log_event("ARMED", {
+                            "price":          round(current_price, 3),
+                            "atr_at_fill":    round(atr, 5),
+                            "spread":         round(spread, 3),
+                            "comment":        "UP_PROBE",
+                            "grid_step_used": round(dynamic_step, 5),
+                            "h4_direction_at_arm": gh._get_h4_direction(),
+                            "kr_regime_at_arm":    bs.get("regime", ""),
+                        })
+                        log.info(f"ARMED UP | price={current_price:.3f}")
+                    elif current_price < recent_low:
+                        armed, probe_extreme = "DOWN_PROBE", current_price
+                        break_level = current_price + dynamic_step
+                        ghost_cache = GhostCache(
+                            probe_direction="DOWN_PROBE",
+                            probe_origin=break_level,
+                            probe_extreme=current_price,
+                            atr_step=dynamic_step,
+                            n_layers=N_LAYERS_DEFAULT,
+                        )
+                        gh.log_event("ARMED", {
+                            "price":          round(current_price, 3),
+                            "atr_at_fill":    round(atr, 5),
+                            "spread":         round(spread, 3),
+                            "comment":        "DOWN_PROBE",
+                            "grid_step_used": round(dynamic_step, 5),
+                            "h4_direction_at_arm": gh._get_h4_direction(),
+                            "kr_regime_at_arm":    bs.get("regime", ""),
+                        })
+                        log.info(f"ARMED DN | price={current_price:.3f}")
+                else:
+                    if armed == "UP_PROBE":
+                        if current_price > probe_extreme:
+                            probe_extreme = current_price
+                            break_level = current_price - dynamic_step
+                        trigger = current_price < break_level
+                    else:
+                        if current_price < probe_extreme:
+                            probe_extreme = current_price
+                            break_level = current_price + dynamic_step
+                        trigger = current_price > break_level
+
+                    # fix-204wire: update the virtual grid every tick the probe is
+                    # still open and NOT currently triggering 201/202/203 — mirrors
+                    # ghost_sniper.py's gc-hunter block exactly. GhostCache.update()
+                    # self-guards against firing twice (entry_fired/invalidated), so
+                    # no extra bookkeeping is needed here beyond calling it.
+                    if ghost_cache is not None and not trigger and switches["ghost_grid"]["204"]:
+                        gc_signal = ghost_cache.update(current_price, atr)
+                        if gc_signal is not None:
+                            gc_type = (mt5.ORDER_TYPE_SELL
+                                       if gc_signal["order_type"] == "SELL"
+                                       else mt5.ORDER_TYPE_BUY)
+                            success = gh.send_order(
+                                gc_type, gc_signal["sl"], 0.0,
+                                gh.MAGIC_GHOST_CACHE, "SNIPER_GC",
+                                atr, armed, "GHOST_CACHE", bs, gates,
+                            )
+                            if not success:
+                                log.warning(f"GHOST_CACHE_FIRE_FAILED magic=204 | {gh.SYMBOL}")
+                            else:
+                                log.warning(
+                                    f"GHOST_CACHE_FIRE magic=204 | "
+                                f"layer_depth={gc_signal['virtual_layer_depth']} | "
+                                f"sl={gc_signal['sl']:.3f}"
+                            )
+                            log_session_event("ghost", "GHOST_CACHE_FIRE",
+                                              symbol=gh.SYMBOL,
+                                              magic=gh.MAGIC_GHOST_CACHE,
+                                              regime=bs.get("regime", ""),
+                                              conviction=float(bs.get("conviction", 0)),
+                                              virtual_layer_depth=gc_signal["virtual_layer_depth"])
+
+                    if trigger:
+                        if spread > gh.SPREAD_MAX and not demo:
+                            log.info(f"SKIP_SPREAD spread={spread:.3f}")
+                            log_session_event("ghost", "SKIP_SPREAD",
+                                              symbol=gh.SYMBOL,
+                                              regime=bs.get("regime", ""),
+                                              conviction=float(bs.get("conviction", 0)))
+                            armed = None
+                            ghost_cache = None
+                        elif daily_pairs >= gh.MAX_DAILY_PAIRS:
+                            armed = None
+                            ghost_cache = None
+                        elif not shared.check_entries_allowed():
+                            # arch-equity-cb: circuit breaker active — skip fire
+                            log.warning(
+                                f"GHOST FIRE BLOCKED — circuit breaker active "
+                                f"({shared.cb_reason})"
+                            )
+                            log_session_event("ghost", "SKIP_CIRCUIT_BREAKER",
+                                              symbol=gh.SYMBOL,
+                                              regime=bs.get("regime", ""))
+                            armed = None
+                            ghost_cache = None
+                        else:
+                            # Fire legs via existing send_order
+                            dir_rev = (mt5.ORDER_TYPE_SELL if armed == "UP_PROBE"
+                                       else mt5.ORDER_TYPE_BUY)
+                            # fix-sltight: reads gh.SCALP_REV_SL_ATR_MULT (0.35,
+                            # was 0.2 inline here) so this thread and the
+                            # standalone reference in ghost_sniper.py can never
+                            # drift apart on this value again.
+                            sl_dist = gh.SCALP_REV_SL_ATR_MULT * atr
+                            sl_rev  = (probe_extreme + sl_dist if armed == "UP_PROBE"
+                                       else probe_extreme - sl_dist)
+                            legs_fired_this_probe = 0
+                            
+                            if gates[201] and switches["ghost_grid"]["201"]:
+                                # Shadow leg fires 100% of the time, bypasses MAX_LEGS limit, does not consume pos_count
+                                success = gh.send_order(dir_rev, sl_rev, 0.0,
+                                              gh.MAGIC_SCALP, "SNIPER_S",
+                                              atr, armed, "SCALP", bs, gates, is_shadow=True)
+                                if success:
+                                    log_session_event("ghost", "FIRE_201_VIRTUAL",
+                                                      symbol=gh.SYMBOL,
+                                                      magic=gh.MAGIC_SCALP)
+                                    # Do NOT increment legs_fired_this_probe
+                                    # Do NOT increment pos_count
+                                else:
+                                    log_session_event("ghost", "FIRE_FAILED_VIRTUAL", symbol=gh.SYMBOL, magic=gh.MAGIC_SCALP)
+                            
+                            # Fix 5: circuit breaker blindspot max limit
+                            pos_count = len(gateway.positions_get() or [])
+                            
+                            # Prioritize 202
+                            # verified: reads gh.MAX_LEGS_PER_PROBE from ghost_sniper module constant
+                            if gates[202] and switches["ghost_grid"]["202"] and legs_fired_this_probe < gh.MAX_LEGS_PER_PROBE and pos_count < MAX_GLOBAL_POSITIONS:
+                                success = gh.send_order(dir_rev, sl_rev, 0.0,
+                                              gh.MAGIC_REVERSAL, "SNIPER_R",
+                                              atr, armed, "REVERSAL", bs, gates)
+                                if success:
+                                    log_session_event("ghost", "FIRE_202",
+                                                      symbol=gh.SYMBOL,
+                                                      magic=gh.MAGIC_REVERSAL,
+                                                      regime=bs.get("regime", ""))
+                                    legs_fired_this_probe += 1
+                                else:
+                                    log_session_event("ghost", "FIRE_FAILED", symbol=gh.SYMBOL, magic=gh.MAGIC_REVERSAL)
+                                pos_count += (1 if success else 0)
+                                
+                            # Leg 203 (Trend-Follow) removed in v5.2:
+                            # SuperTrend bot (si_confirmed=0.55) handles all trend entries.
+                            daily_pairs += 1
+                            armed = None
+                            ghost_cache = None
+                            stop.wait(gh.COOLDOWN_SECONDS)
+                            continue
+
+            except Exception as e:
+                log.error(f"Hunter tick error: {e}", exc_info=True)
+            stop.wait(GHOST_INTERVAL)
+
+    except Exception as e:
+        log.error(f"Ghost Hunter thread fatal: {e}", exc_info=True)
+    finally:
+        log.info("Ghost Hunter thread stopped")
+
+
+def cab_watcher_thread(gateway: MT5Gateway, shared: SharedState,
+                       stop: ShutdownEvent):
+    """
+    CAB Watcher wrapper — runs manage_fluid_logic() every CAB_INTERVAL.
+    After pu-cab-port it will use gateway instead of direct mt5 calls.
+    """
+    log = logging.getLogger("Thread.CAB")
+    log.info("CAB Watcher thread starting")
+
+    if not CAB_AVAILABLE:
+        log.warning("CAB Watcher module not importable — thread exiting")
+        return
+
+    try:
+        # CAB filename contains a hyphen — use importlib for safe loading
+        import importlib.util as _ilu
+        _cab_path = Path(__file__).parent / "cab_super" / "cab_watcher.py"
+        _spec = _ilu.spec_from_file_location("cab_watcher", _cab_path)
+        cab = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(cab)
+        cab.set_gateway(gateway)   # wire shared MT5 connection
+
+        # Add file handler for CAB's root-level logging calls
+        import logging as _logging
+        from logging.handlers import RotatingFileHandler
+        _cab_log_path = Path(__file__).parent / "logs" / "cab_watcher.log"
+        _cab_fh = RotatingFileHandler(_cab_log_path, maxBytes=5*1024*1024, backupCount=5, encoding="utf-8")
+        _cab_fh.setFormatter(_logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        _logging.getLogger().addHandler(_cab_fh)
+
+        log.warning("CAB Watcher: gateway wired in")
+        while not stop.is_set():
+            cycle_start = time.time()
+            try:
+                cab.manage_fluid_logic()
+                intel = cab.get_market_regime()
+                log_session_event("cab", "WATCHER_CYCLE",
+                                  symbol=cab.SYMBOL,
+                                  magic=cab.MAGIC_NUMBER,
+                                  regime=intel.get("regime", ""),
+                                  conviction=intel.get("scores", {}).get("adx_rank"))
+            except Exception as e:
+                log.error(f"CAB cycle error: {e}", exc_info=True)
+            stop.wait(max(0, CAB_INTERVAL - (time.time() - cycle_start)))
+
+    except Exception as e:
+        log.error(f"CAB thread fatal: {e}", exc_info=True)
+    finally:
+        log.info("CAB thread stopped")
+
+
+def cab_entry_thread(gateway: MT5Gateway, shared: SharedState,
+                     stop: ShutdownEvent, config_path: str):
+    """
+    CAB Entry wrapper — runs CABEntryRunner.run_cycle_all() every
+    CAB_ENTRY_INTERVAL seconds until stop is requested.
+
+    H4 bars are 4 hours long so a 30-second poll cycle is more than
+    sufficient — we catch every new bar within 30 seconds of it opening.
+
+    Heartbeat is written every cycle so CABFailover.mq5 (or
+    UnifiedFailover.mq5) knows Python is alive.
+    """
+    log = logging.getLogger("Thread.CABEntry")
+    log.info("CAB Entry thread starting")
+
+    try:
+        import json
+        import importlib.util as _ilu
+        from pathlib import Path as _Path
+
+        # Load cab_entry from cab_super\
+        _entry_path = _Path(__file__).parent / "cab_super" / "cab_entry.py"
+        _spec = _ilu.spec_from_file_location("cab_entry", _entry_path)
+        _mod  = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+
+        # Read config to build per-symbol configs + heartbeat path
+        with open(config_path) as f:
+            config_data = json.load(f)
+
+        configs = _mod.build_cab_entry_configs(config_data)
+        hb_path = config_data.get("heartbeat", {}).get("path", "")
+
+        runner = _mod.CABEntryRunner(
+            configs,
+            gateway=gateway,
+            heartbeat_path=hb_path,
+            interval_seconds=CAB_ENTRY_INTERVAL,
+        )
+        log.warning(
+            f"CAB Entry: gateway wired | "
+            f"symbols={[c.symbol for c in configs]} | "
+            f"heartbeat={'ON' if hb_path else 'OFF'}"
+        )
+
+        while not stop.is_set():
+            cycle_start = time.time()
+            try:
+                # arch-equity-cb: skip new CAB entries when circuit breaker active
+                # fix-switches: same scoping — cab_enabled=False blocks new
+                # entries only. cab_watcher_thread's manage_fluid_logic() keeps
+                # running regardless, so open positions are never left unmanaged.
+                switches = load_switches(config_path)
+                pos_count = len(gateway.positions_get() or [])
+                if not shared.check_entries_allowed():
+                    log.debug(
+                        f"CAB entries blocked — circuit breaker active "
+                        f"({shared.cb_reason})"
+                    )
+                elif not switches["cab_enabled"]:
+                    log.debug("CAB entries blocked — cab_enabled switch is off")
+                elif pos_count >= MAX_GLOBAL_POSITIONS:
+                    log.debug("CAB entries blocked — global max positions limit reached")
+                else:
+                    opened = runner.run_cycle_all()
+                    if opened:
+                        log_session_event(
+                            "cab", "ENTRY_FIRED",
+                            symbol="multi",
+                            magic=999555,
+                            regime=shared.get_market_state().get("regime", ""),
+                        )
+            except Exception as e:
+                log.error(f"CAB entry cycle error: {e}", exc_info=True)
+            stop.wait(max(0, CAB_ENTRY_INTERVAL - (time.time() - cycle_start)))
+
+    except Exception as e:
+        log.error(f"CAB Entry thread fatal: {e}", exc_info=True)
+    finally:
+        log.info("CAB Entry thread stopped")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  MAGIC ISOLATION CHECKER
+# ──────────────────────────────────────────────────────────────────────────────
+
+def check_magic_isolation(gateway: MT5Gateway) -> bool:
+    """
+    Verify each open position's magic number belongs to exactly one bot.
+    Log any conflicts. Call from main thread health monitor.
+    Returns True if isolation is clean.
+    """
+    positions = gateway.positions_get()
+    conflicts = []
+    for pos in positions:
+        m = pos.magic
+        owners = []
+        if m in MAGIC_SUPERTREND: owners.append("supertrend")
+        if m in MAGIC_GHOST:      owners.append("ghost")
+        if m in MAGIC_CAB:        owners.append("cab")
+        if len(owners) != 1:
+            conflicts.append({
+                "ticket": pos.ticket, "magic": m, "symbol": pos.symbol,
+                "owners": owners or ["UNKNOWN"],
+            })
+
+    if conflicts:
+        logger.error(f"MAGIC ISOLATION BREACH: {conflicts}")
+        log_session_event("unified", f"MAGIC_ISOLATION_BREACH_{len(conflicts)}")
+        # fix-isolationlog: one structured row per offending position, not
+        # just a count — this is what makes "which magic number is this"
+        # a CSV filter instead of grepping unified_runner.log by hand.
+        for c in conflicts:
+            log_session_event(
+                "unified", "MAGIC_ISOLATION_BREACH_DETAIL",
+                symbol=c["symbol"], magic=c["magic"],
+                regime=",".join(c["owners"]),   # reused field: comma-joined owner list ("UNKNOWN" if none)
+            )
+        return False
+
+    logger.info(
+        f"Magic isolation OK | {len(positions)} positions | "
+        f"all magic numbers recognised"
+    )
+    return True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  MAIN ENTRY POINT
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Unified Bot Runner")
+    parser.add_argument("--account", default="demo", choices=["demo", "live"])
+    parser.add_argument("--config",  default="config/config.json")
+    parser.add_argument("--no-demo", action="store_true",
+                        help="Disable demo mode (apply position caps + equity filter)")
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args()
+
+    demo = not args.no_demo   # demo=True by default
+    setup_logging(args.log_level)
+
+    logger.info("=" * 60)
+    logger.info("  UNIFIED RUNNER — Starting")
+    logger.info(f"  Mode       : {'DEMO' if demo else 'LIVE'}")
+    logger.info(f"  ST interval: {SUPERTREND_INTERVAL}s")
+    logger.info(f"  Ghost int  : {GHOST_INTERVAL}s")
+    logger.info(f"  CAB int    : {CAB_INTERVAL}s")
+    logger.info("=" * 60)
+
+    # Load config
+    try:
+        with open(args.config) as f:
+            config_data = json.load(f)
+    except Exception as e:
+        logger.error(f"Config load failed: {e}")
+        sys.exit(1)
+
+    account_cfg = config_data.get("accounts", {}).get(args.account)
+    if not account_cfg:
+        logger.error(f"Account '{args.account}' not in config.json")
+        sys.exit(1)
+
+    # fix-credentials (audit finding #9): env vars override config.json's
+    # plaintext credentials when set, matching the pattern cab_watcher.py's
+    # standalone run_brain() already uses (MT5_LOGIN/MT5_PASSWORD/MT5_SERVER).
+    # Fully backward compatible — if none of these are set, behavior is
+    # identical to before (reads straight from config.json). This doesn't
+    # require changing anything today; it just gives a path off committing
+    # credentials to a JSON file whenever you're ready to take it.
+    account_cfg = dict(account_cfg)  # don't mutate config_data's own dict
+    if os.environ.get("MT5_LOGIN"):
+        account_cfg["login"] = int(os.environ["MT5_LOGIN"])
+    if os.environ.get("MT5_PASSWORD"):
+        account_cfg["password"] = os.environ["MT5_PASSWORD"]
+    if os.environ.get("MT5_SERVER"):
+        account_cfg["server"] = os.environ["MT5_SERVER"]
+    if os.environ.get("MT5_PATH"):
+        account_cfg["mt5_path"] = os.environ["MT5_PATH"]
+
+    # Initialise MT5 Gateway
+    gateway = MT5Gateway()
+    if not gateway.initialize(path=account_cfg.get("mt5_path")):
+        logger.error("MT5Gateway.initialize() failed — aborting")
+        sys.exit(1)
+    if not gateway.login(
+        account_cfg["login"], account_cfg["password"], account_cfg["server"]
+    ):
+        logger.error("MT5Gateway.login() failed — aborting")
+        gateway.shutdown()
+        sys.exit(1)
+
+    account_info = gateway.account_info()
+    logger.warning(
+        f"Connected | Account={account_info.login} "
+        f"Balance={account_info.balance:.2f} "
+        f"Server={account_info.server}"
+    )
+
+    # Shared state + shutdown coordinator
+    shared = SharedState()
+    stop   = ShutdownEvent()
+    
+    # Layer 0 Knowledge Register & Pulse Engine
+    symbols = list(config_data.get("symbols", {}).keys())
+    kr = KnowledgeRegister()
+    pulse = MarketPulseEngine(gateway, kr, symbols)
+    pulse.start()
+
+    _init_session_log()
+    log_session_event("unified", "RUNNER_START")
+
+    # Launch bot threads
+    threads = []
+
+    t_ghost_watcher = threading.Thread(
+        target=ghost_watcher_thread,
+        args=(gateway, shared, stop),
+        name="GhostWatcher",
+        daemon=True,
+    )
+    threads.append(t_ghost_watcher)
+
+    t_ghost_hunter = threading.Thread(
+        target=ghost_hunter_thread,
+        args=(gateway, shared, stop, demo, args.config),
+        name="GhostHunter",
+        daemon=True,
+    )
+    threads.append(t_ghost_hunter)
+
+    t_cab = threading.Thread(
+        target=cab_watcher_thread,
+        args=(gateway, shared, stop),
+        name="CABWatcher",
+        daemon=True,
+    )
+    threads.append(t_cab)
+
+    t_cab_entry = threading.Thread(
+        target=cab_entry_thread,
+        args=(gateway, shared, stop, args.config),
+        name="CABEntry",
+        daemon=True,
+    )
+    threads.append(t_cab_entry)
+
+    t_st = threading.Thread(
+        target=supertrend_thread,
+        args=(gateway, shared, stop, args.config, account_cfg, demo),
+        name="SuperTrend",
+        daemon=True,
+    )
+    threads.append(t_st)
+
+    for t in threads:
+        t.start()
+        logger.warning(f"Thread started: {t.name}")
+        time.sleep(0.5)   # slight stagger to avoid simultaneous MT5 init
+
+    # ── Main thread: equity heartbeat + health monitor ─────────────────────
+    logger.info("Main thread entering heartbeat loop")
+
+    # arch-equity-cb: sample starting equity once at session open
+    _start_acc = gateway.account_info()
+    if _start_acc:
+        shared.set_daily_start_equity(_start_acc.equity)
+        logger.warning(
+            f"Circuit breaker armed | start_equity={_start_acc.equity:.2f} | "
+            f"max_daily_loss={config_data['global_settings'].get('max_daily_loss_percent', 10.0)}%"
+        )
+
+    _max_loss_pct = config_data["global_settings"].get("max_daily_loss_percent", 10.0)
+
+    try:
+        from data.trade_ledger import write_equity_snapshot
+    except ImportError:
+        write_equity_snapshot = None
+
+    try:
+        last_isolation_check = 0.0
+        while True:
+            time.sleep(HEARTBEAT_INTERVAL)
+
+            # Thread health
+            alive = {t.name: t.is_alive() for t in threads}
+            dead  = [name for name, ok in alive.items() if not ok]
+            if dead:
+                logger.error(
+                    f"DEAD THREADS: {dead} — other threads continuing"
+                )
+                log_session_event("unified", f"THREAD_DEAD_{','.join(dead)}")
+                # Log and continue — do NOT stop the runner
+            else:
+                acc = gateway.account_info()
+                eq_str = f" | Equity={acc.equity:.2f} P&L={acc.profit:.2f}" if acc else ""
+                logger.warning(f"Heartbeat OK | {len(alive)} threads alive{eq_str}")
+                log_session_event("unified", "EQUITY_HEARTBEAT",
+                                  r_multiple=round(acc.profit / max(acc.balance, 1), 4))
+                if acc and write_equity_snapshot:
+                    pos_count = len(gateway.positions_get() or [])
+                    write_equity_snapshot(acc.equity, acc.balance, acc.profit, pos_count)
+
+
+                # ── arch-equity-cb: daily drawdown circuit breaker ─────────────
+                # Checks every HEARTBEAT_INTERVAL (60s). Trips when current equity
+                # has fallen more than max_daily_loss_percent below session-start
+                # equity. Blocks ALL new entries across all three bots.
+                # Existing positions continue to be managed normally — watchers
+                # keep running. Only entry engines are paused.
+                # This replaces the position-count cap as the global safety net.
+                drawdown_pct = 0.0
+                if acc and shared.daily_start_equity > 0:
+                    drawdown_pct = (
+                        (shared.daily_start_equity - acc.equity)
+                        / shared.daily_start_equity * 100.0
+                    )
+                    if drawdown_pct >= _max_loss_pct and shared.check_entries_allowed():
+                        reason = (
+                            f"Daily drawdown {drawdown_pct:.2f}% >= "
+                            f"limit {_max_loss_pct:.1f}% | "
+                            f"start={shared.daily_start_equity:.2f} "
+                            f"current={acc.equity:.2f}"
+                        )
+                        shared.trip_circuit_breaker(reason)
+                        logger.error(
+                            f"CIRCUIT BREAKER TRIPPED — {reason} | "
+                            f"All new entries BLOCKED for this session"
+                        )
+                        log_session_event("unified", "CIRCUIT_BREAKER_TRIPPED")
+                    elif shared.check_entries_allowed():
+                        logger.info(
+                            f"CB OK | drawdown={drawdown_pct:.2f}% "
+                            f"(limit {_max_loss_pct:.1f}%) | entries OPEN"
+                        )
+                    else:
+                        logger.warning(
+                            f"CB ACTIVE | drawdown={drawdown_pct:.2f}% | "
+                            f"entries BLOCKED since "
+                            f"{datetime.fromtimestamp(shared.cb_fired_at).strftime('%H:%M:%S')}"
+                        )
+
+                # KPI ledger snapshot — analytical layer, never read by mechanical system
+                try:
+                    all_pos_for_kpi = gateway.positions_get()
+                    ms_xau = shared.get_market_state()
+                    write_kpi_snapshot(
+                        equity=acc.equity if acc else 0.0,
+                        balance=acc.balance if acc else 0.0,
+                        open_pnl=acc.profit if acc else 0.0,
+                        daily_drawdown_pct=drawdown_pct,
+                        entries_allowed=shared.check_entries_allowed(),
+                        positions=all_pos_for_kpi,
+                        regime_xauusd=ms_xau.get("regime", ""),
+                        conviction_xauusd=ms_xau.get("conviction", 0.0),
+                    )
+                except Exception as _kpi_e:
+                    logger.debug(f"KPI ledger write failed: {_kpi_e}")
+
+            # Magic isolation check (every 5 minutes)
+            if time.time() - last_isolation_check > 300:
+                check_magic_isolation(gateway)
+                last_isolation_check = time.time()
+
+            # MT5 connection health — check IPC failure state first
+            if not gateway.is_healthy:
+                logger.error(
+                    f"IPC failure ({gateway._ipc_fail_count} consecutive) "
+                    f"— forcing reconnect"
+                )
+                gateway._ipc_fail_count = 0   # reset so reconnect can proceed
+                gateway.reconnect_if_needed(
+                    path=account_cfg.get("mt5_path"),
+                    login=account_cfg["login"],
+                    password=account_cfg["password"],
+                    server=account_cfg["server"],
+                )
+            elif not gateway.reconnect_if_needed(
+                path=account_cfg.get("mt5_path"),
+                login=account_cfg["login"],
+                password=account_cfg["password"],
+                server=account_cfg["server"],
+            ):
+                logger.critical("MT5 connection could not be restored")
+
+    except KeyboardInterrupt:
+        logger.info("Shutdown requested (Ctrl+C)")
+    finally:
+        stop.request()
+        logger.info("Stop signal sent to all threads")
+        pulse.stop()
+        for t in threads:
+            t.join(timeout=10)
+            if t.is_alive():
+                logger.warning(f"Thread {t.name} did not exit cleanly")
+        gateway.shutdown()
+        log_session_event("unified", "RUNNER_STOP")
+        logger.info("Unified Runner stopped cleanly")
+
+
+if __name__ == "__main__":
+    main()
+--- ghost_super/ghost_sniper.py ---
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║        GHOST SNIPER v5.1 — Intelligence-Gated Execution Engine   ║
+║  Architecture: Layer 2 — The Filter                              ║
+╚══════════════════════════════════════════════════════════════════╝
+
+ARCHITECTURE ROLE — Layer 2: The Filter
+  Before firing any probe, this script reads the Brain's market state
+  (brain_state_live.csv written by Watcher v3.1 every 2 seconds)
+  and applies regime-specific gates:
+
+  GATE RULES (v5.2 — Leg 203 REMOVED; trend-following handed off to SuperTrend):
+  ┌─────────────────┬────────┬──────────────────────────────────────┐
+  │ Leg             │ Magic  │ Condition                            │
+  ├─────────────────┼────────┼──────────────────────────────────────┤
+  │ Scalp           │  201   │ Always active (if spread ≤ max)      │
+  │ Reversal        │  202   │ BLOCKED if ADX > 40 OR conv > 60     │
+  └─────────────────┴────────┴──────────────────────────────────────┘
+
+  In a strong trend (ADX>40 or Conv>60): only 201 fires (202 blocked).
+  In exhaustion/low-conviction: 201 + 202 fire.
+  In ranging low-ADX: 201 + 202 fire (default open).
+
+  NOTE: Leg 203 (Trend-Follow, Magic MAGIC_TREND_FOLLOW) has been
+  fully removed. Trend entries are now exclusively managed by
+  core/supertrend_bot.py (si_confirmed=0.55) across all four pairs.
+
+KEY CHANGES vs v4.8.2 (v5.0 baseline):
+  1. GRID_STEP is dynamic: 1.0 × ATR (floor 0.5).
+     Replaces the fixed 0.5 that caused 76 trade-pairs on Apr 23.
+  2. Gate logic blocks / allows legs based on live brain state.
+  3. 150ms sleep between each order_send to eliminate Err 10027.
+  4. Broker buffer raised from point×10 to point×20 for SL anchor.
+  5. Enhanced audit CSV: sl, tp, atr, conviction, adx, regime,
+     probe_direction, leg_type, grid_step_used at every fill.
+  6. RotatingFileHandler on hunter log (no shell redirect needed).
+  7. Daily pair counter (soft cap, 999 = unlimited for demo).
+  8. Session-tagged fills (ASIAN / LONDON / NY_OVERLAP / NY_CLOSE).
+
+====================================================================
+  CHANGELOG v5.2 — Leg 203 Removal
+====================================================================
+  1. STRIPPED: Leg 203 (Trend-Follow) completely removed.
+     SuperTrend bot (si_confirmed=0.55) absorbs trend-follow role.
+  2. AUDIT CSV: gate_203 column removed — only gate_201/gate_202 remain.
+  3. apply_gates() now returns {201: bool, 202: bool} only.
+  4. SLAB C GRACE, FLUID TP, INFRASTRUCTURE from v5.1 unchanged.
+
+  CHANGELOG v5.1 (unchanged from prior):
+  1. STRIPPED: Abandoned 'Strict 1:3 RRR' per research reports.
+  2. FLUID TP: Watcher (Layer 3) owns all exits via exhaustion logic.
+  3. BUFFER: SL anchor buffer raised to point×25 (was point×20).
+  4. TP GUARD: TP stops-level check is skipped when tp=0.0 (Fluid TP).
+"""
+
+import MetaTrader5 as mt5
+import pandas as pd
+import numpy as np
+import time
+import os
+import csv
+import logging
+import logging.handlers
+from datetime import datetime, date
+
+# fix-204wire: run_hunter() below references GhostCache / N_LAYERS_DEFAULT /
+# MAGIC_GHOST_CACHE but this file never imported them — a standalone
+# `python ghost_sniper.py` run would NameError the moment a probe armed.
+# Try both import forms since this module gets loaded two different ways in
+# this codebase: as part of the ghost_super package (unified_runner.py) and
+# via importlib.spec_from_file_location pointed straight at this file (tests).
+try:
+    from ghost_cache import GhostCache, N_LAYERS_DEFAULT, MAGIC_GHOST_CACHE
+except ImportError:
+    from ghost_super.ghost_cache import GhostCache, N_LAYERS_DEFAULT, MAGIC_GHOST_CACHE
+
+try:
+    from data.trade_ledger import write_trade_event
+except ImportError:
+    write_trade_event = None
+
+# ─────────────────────────────────────────────
+#  GATEWAY  (set by unified_runner; None = standalone mode)
+# ─────────────────────────────────────────────
+_GATEWAY = None
+
+def set_gateway(gw):
+    """Called once by unified_runner after MT5Gateway is initialised."""
+    global _GATEWAY
+    _GATEWAY = gw
+
+def _api():
+    """Return gateway in unified mode, raw mt5 in standalone mode."""
+    return _GATEWAY if _GATEWAY is not None else mt5
+
+
+# ─────────────────────────────────────────────
+#  CONFIGURATION
+# ─────────────────────────────────────────────
+SYMBOL             = "XAUUSDm"
+MT5_PATH           = r"C:\Program Files\MetaTrader 5 EXNESS - Copy\terminal64.exe"
+LOT_SIZE           = 0.01
+
+ACCOUNT            = 260714012
+PASSWORD           = "Sal_4659$"
+SERVER             = "Exness-MT5Trial15"
+
+MAGIC_SCALP        = 201
+MAGIC_REVERSAL     = 202
+
+SPREAD_MAX         = 1.5
+COOLDOWN_SECONDS   = 45
+DATA_LOG_FILE      = "sniper_v51_live_audit.csv"
+BRAIN_STATE_FILE   = "brain_state_live.csv"
+HUNTER_LOG_FILE    = "logs/sniper_hunter.log"
+ADAPTIVE_THRESHOLD_FILE = "adaptive_thresholds_live.csv"
+
+# ── Gate thresholds ──────────────────────────────
+# 202 is BLOCKED when EITHER condition is true
+GATE_202_ADX_BLOCK    = 40     # block reversal if ADX above this
+GATE_202_CONV_BLOCK   = 60     # block reversal if conviction above this
+
+MAX_LEGS_PER_PROBE    = 1      # set to 2 to re-enable dual-leg firing
+MAX_DAILY_PAIRS       = 999    # 999 = unlimited (demo). Set lower for live.
+ATR_STEP_MULTIPLIER   = 1.0    # GRID_STEP = ATR × this
+ATR_STEP_FLOOR        = 0.5    # minimum step in points
+
+# fix-sltight (Tier 1 #4): 201/202 initial SL distance. Was 0.2×ATR — inside a
+# single M1 bar's normal noise band on Gold, and confirmed from two weeks of
+# live data as the single largest loss driver: 1,020 of 2,458 combined 201/202
+# trades (41.5%) hit this SL before ever reaching the +0.5R BE-lock milestone,
+# for -$2,559.67 — more than the entire net Ghost Grid loss for the period.
+# Change 8: widened to 0.8 to give trades more room to breathe.
+SCALP_REV_SL_ATR_MULT = 0.35    # HIGH-1: reverted back from 0.8 (and 0.2 before that)
+
+# audit-oob-tp: Hard broker-side TP at +2R failsafe (Change 10).
+# Replaces the 3xATR OOB TP with a tighter 2R profit-securing TP for all
+# Fluid TP (tp=0.0) legs so gains aren't given back if the watcher dies.
+HARD_FAILSAFE_TP_R    = 2.0   # OOB TP = entry ± 2R (broker failsafe)
+
+
+# ─────────────────────────────────────────────
+#  LOGGING
+# ─────────────────────────────────────────────
+logger = logging.getLogger("hunter")
+logger.setLevel(logging.INFO)
+_fh = logging.handlers.RotatingFileHandler(
+    HUNTER_LOG_FILE, maxBytes=2*1024*1024, backupCount=5, encoding="utf-8"
+)
+_fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+_ch = logging.StreamHandler()
+_ch.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+logger.addHandler(_fh)
+logger.addHandler(_ch)
+
+# ─────────────────────────────────────────────
+#  AUDIT CSV
+# ─────────────────────────────────────────────
+AUDIT_HEADER = [
+    "timestamp", "session", "event_type",
+    # execution
+    "price", "spread", "latency_ms",
+    # order details
+    "magic", "leg_type", "side", "sl", "tp", "comment",
+    # market at execution
+    "atr_at_fill", "grid_step_used", "probe_direction",
+    # brain state at execution
+    "conviction_at_fill", "adx_at_fill", "regime_at_fill",
+    # gate decisions (gate_203 removed — Leg 203 eliminated in v5.2)
+    "gate_201", "gate_202",
+    "h4_direction_at_arm",
+    "kr_regime_at_arm",
+]
+
+def get_session():
+    h = datetime.utcnow().hour
+    if  8 <= h < 12: return "LONDON"
+    if 12 <= h < 16: return "NY_OVERLAP"
+    if 16 <= h < 21: return "NY_CLOSE"
+    return "ASIAN"
+
+def log_event(event_type, data):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    row = [
+        ts,
+        get_session(),
+        event_type,
+        data.get("price",              ""),
+        data.get("spread",             ""),
+        data.get("latency_ms",         ""),
+        data.get("magic",              ""),
+        data.get("leg_type",           ""),
+        data.get("side",               ""),
+        data.get("sl",                 ""),
+        data.get("tp",                 ""),
+        data.get("comment",            ""),
+        data.get("atr_at_fill",        ""),
+        data.get("grid_step_used",     ""),
+        data.get("probe_direction",    ""),
+        data.get("conviction_at_fill", ""),
+        data.get("adx_at_fill",        ""),
+        data.get("regime_at_fill",     ""),
+        data.get("gate_201",           ""),
+        data.get("gate_202",           ""),
+        data.get("h4_direction_at_arm", ""),
+        data.get("kr_regime_at_arm",    ""),
+        # gate_203 removed in v5.2 — Leg 203 eliminated
+    ]
+    file_exists = os.path.isfile(DATA_LOG_FILE)
+    with open(DATA_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if not file_exists:
+            w.writerow(AUDIT_HEADER)
+        w.writerow(row)
+
+# ─────────────────────────────────────────────
+#  BRAIN STATE READER
+# ─────────────────────────────────────────────
+_EMPTY_STATE = {
+    "conviction": 50.0, "adx": 0.0, "atr": 0.0,
+    "regime": "UNKNOWN", "updated_utc": "",
+}
+
+def read_brain_state():
+    """
+    Read live brain state directly from sniper_watcher (which queries KnowledgeRegister).
+    Eliminates CSV file I/O latency. Returns _EMPTY_STATE on any failure.
+    """
+    try:
+        from ghost_super.sniper_watcher import get_market_state
+        conviction, adx_val, atr_raw, regime = get_market_state()
+        return {
+            "conviction": float(conviction),
+            "adx": float(adx_val),
+            "atr": float(atr_raw),
+            "regime": str(regime),
+            "updated_utc": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except Exception as e:
+        logger.debug(f"read_brain_state failed: {e}")
+        return _EMPTY_STATE.copy()
+
+# ─────────────────────────────────────────────
+#  ADAPTIVE THRESHOLD READER
+# ─────────────────────────────────────────────
+# Hardcoded fallback values — used on cold-start or file error
+# v5.2: tf_conv_fire removed — gate 203 no longer exists
+_ADAPTIVE_DEFAULTS_HUNTER = {
+    "rev_adx_block": 40.0,   # gate 202: block reversal if ADX above this
+    "is_adaptive":      0,
+}
+
+def read_adaptive_thresholds_hunter():
+    """
+    Read adaptive_thresholds_live.csv written by the Brain every heartbeat.
+    Falls back to hardcoded defaults on any failure — gates never crash.
+    v5.2: tf_conv_fire key removed (Leg 203 eliminated).
+    """
+    try:
+        if not os.path.isfile(ADAPTIVE_THRESHOLD_FILE):
+            return _ADAPTIVE_DEFAULTS_HUNTER.copy()
+        with open(ADAPTIVE_THRESHOLD_FILE, "r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        if not rows:
+            return _ADAPTIVE_DEFAULTS_HUNTER.copy()
+        row = rows[0]
+        return {
+            "rev_adx_block": float(row.get("rev_adx_block", _ADAPTIVE_DEFAULTS_HUNTER["rev_adx_block"])),
+            "is_adaptive":   int(row.get("is_adaptive",     0)),
+        }
+    except Exception:
+        return _ADAPTIVE_DEFAULTS_HUNTER.copy()
+
+
+def apply_gates(bs):
+    """
+    Returns {201: fire, 202: fire} using adaptive thresholds
+    derived from the last 60 minutes of real Gold conviction data.
+
+    Falls back to hardcoded v5.2 defaults on cold-start or file error.
+
+    Gate logic:
+      201 — always fires (spread guard handled in main loop)
+      202 — blocked when ADX > rev_adx_block (P70 of recent ADX)
+             also blocked when conviction > GATE_202_CONV_BLOCK (static, unchanged)
+
+    NOTE: gate_203 (Trend-Follow) removed in v5.2.
+    Trend entries are now exclusively handled by SuperTrend bot.
+    """
+    try:
+        adx  = float(bs.get("adx",        0))
+        conv = float(bs.get("conviction",  0))
+    except (TypeError, ValueError):
+        adx, conv = 0.0, 50.0
+
+    # Load adaptive thresholds from Brain's calibration
+    adaptive      = read_adaptive_thresholds_hunter()
+    adx_block_202 = adaptive["rev_adx_block"]   # P70 ADX  (default 40)
+    is_adaptive   = adaptive["is_adaptive"]
+
+    gate_201 = True
+
+    # 202: blocked in strong trend — adaptive ADX block + static conviction block
+    gate_202 = not (adx > adx_block_202 or conv > GATE_202_CONV_BLOCK)
+
+    logger.debug(
+        f"GATES | ADX={round(adx,2)} Conv={round(conv,1)} | "
+        f"adx_block202={'[A]' if is_adaptive else '[D]'}{adx_block_202} | "
+        f"201={gate_201} 202={gate_202}"
+    )
+
+    return {201: gate_201, 202: gate_202}
+
+# ─────────────────────────────────────────────
+#  ATR / ADX HELPERS
+# ─────────────────────────────────────────────
+def _get_atr(df, n=14):
+    df = df.copy()
+    df["tr"] = pd.concat(
+        [df["high"] - df["low"],
+         (df["high"] - df["close"].shift()).abs()], axis=1).max(axis=1)
+    return float(df["tr"].rolling(n).mean().iloc[-1])
+
+def _get_adx(df, n=14):
+    """Returns (adx, +DI, -DI). Available as local fallback reference."""
+    df = df.copy()
+    df["up"]  = df["high"] - df["high"].shift(1)
+    df["dn"]  = df["low"].shift(1) - df["low"]
+    df["+dm"] = np.where((df["up"] > df["dn"]) & (df["up"] > 0), df["up"], 0)
+    df["-dm"] = np.where((df["dn"] > df["up"]) & (df["dn"] > 0), df["dn"], 0)
+    df["tr"]  = pd.concat(
+        [df["high"] - df["low"],
+         (df["high"] - df["close"].shift()).abs()], axis=1).max(axis=1)
+    tr_s  = df["tr"].rolling(n).sum()
+    p_di  = 100 * df["+dm"].rolling(n).sum() / tr_s
+    m_di  = 100 * df["-dm"].rolling(n).sum() / tr_s
+    dx    = 100 * (p_di - m_di).abs() / (p_di + m_di)
+    return float(dx.rolling(n).mean().iloc[-1]), float(p_di.iloc[-1]), float(m_di.iloc[-1])
+
+def _get_h4_direction() -> str:
+    """
+    Returns 'UP', 'DOWN', or 'UNKNOWN' based on whether the last closed
+    H4 bar's close is above or below the close 3 bars prior.
+    Uses 4 H4 bars: bar[0]=current open, bar[1..3]=last three closed.
+    Simple structural bias — not a regime classifier.
+    """
+    try:
+        rates = _api().copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_H4, 0, 4)
+        if rates is None or len(rates) < 4:
+            return "UNKNOWN"
+        last_close = float(rates[-2]["close"])   # last closed bar
+        ref_close  = float(rates[-4]["close"])   # 3 bars before that
+        if last_close > ref_close:
+            return "UP"
+        elif last_close < ref_close:
+            return "DOWN"
+        return "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+# ─────────────────────────────────────────────
+#  EXECUTION ENGINE
+# ─────────────────────────────────────────────
+def send_order(order_type, sl, tp, magic, comment,
+               atr, probe_direction, leg_type, brain_state, gates, is_shadow=False):
+    """
+    Two-phase execution:
+      Phase 1: Market fill
+      Phase 2: SLTP anchor (with raised buffer + retry on 10016)
+
+    v5.1 notes:
+      - tp=0.0 signals Fluid TP (Naked Signal). TP stops-level guard is
+        intentionally skipped when tp==0.0 to avoid accidental inflation.
+      - On 10016 retry, only sl is updated (tp stays 0.0).
+      - SL buffer raised to point×25 (was point×20 in v5.0).
+      - Retry buffer raised to point×35 (was point×30 in v5.0).
+      - Logs ORDER_FILL_V51 on SL success, ORDER_FILL_V51_NO_SL on fail.
+    """
+    t0          = time.time()
+    sym_info    = _api().symbol_info(SYMBOL)
+    tick        = _api().symbol_info_tick(SYMBOL)
+    if not sym_info or not tick:
+        return None
+        
+    # ── KR Layer 2 & 3: Hard Blocks ──────────────────────────────────────
+    from core.knowledge_register import KnowledgeRegister
+    kr = KnowledgeRegister()
+    kr_dir = 1 if order_type == mt5.ORDER_TYPE_BUY else -1
+    
+    invalidated, inv_reason = kr.is_entry_invalidated(SYMBOL, kr_dir)
+    if invalidated:
+        logger.info(f"Entry BLOCKED by KR Layer 2: {inv_reason}")
+        return None
+        
+    account_info = _api().account_info()
+    equity = account_info.equity if account_info else 10000.0
+    allowed, p_reason = kr.check_portfolio_entry_allowed(
+        symbol=SYMBOL,
+        direction=kr_dir,
+        proposed_risk_pct=0.5,
+        account_equity=equity
+    )
+    if not allowed:
+        logger.info(f"Entry BLOCKED by KR Layer 3: {p_reason}")
+        return None
+
+    price  = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+    spread = round(tick.ask - tick.bid, 3)
+    side   = "BUY" if order_type == mt5.ORDER_TYPE_BUY else "SELL"
+
+    if is_shadow:
+        logger.info(f"[GhostSniper] VIRTUAL_FILL magic={magic} ticket=VIRTUAL price={price}")
+        from core.knowledge_register import KnowledgeRegister, TradeThesis
+        kr = KnowledgeRegister()
+        snapshot = kr.get_market_state(SYMBOL, "M15")
+        if snapshot:
+            thesis = TradeThesis(
+                ticket=999999 + magic, # dummy ticket
+                magic=magic,
+                symbol=SYMBOL,
+                direction=1 if order_type == mt5.ORDER_TYPE_BUY else -1,
+                bot_id="Ghost",
+                setup_type=leg_type,
+                fill_price=price,
+                fill_time=time.time(),
+                entry_atr=atr,
+                entry_regime=snapshot.regime,
+                entry_conviction=float(brain_state.get("conviction", 0.0)),
+                initial_sl=sl,
+                initial_tp=tp,
+                market_snapshot=snapshot,
+                is_virtual=True
+            )
+            kr.unregister_trade_thesis(999999 + magic)
+            kr.register_trade_thesis(thesis)
+        return True
+
+
+    # SL guard (gh-slguard) — dynamic buffer = stops_level + 20% headroom
+    # Fixed point*25 buffer was too small for XAUUSD (stops_level 100+ pts)
+    stops_level = sym_info.trade_stops_level * sym_info.point
+    buf         = max(sym_info.point * 25, stops_level * 0.20)  # at least 20% headroom
+
+    if order_type == mt5.ORDER_TYPE_BUY:
+        min_sl = price - stops_level - buf
+        if sl > price - stops_level:
+            logger.debug(
+                f"SL guard BUY: {sl:.3f} too close to {price:.3f} "
+                f"(stops={stops_level:.3f}) — widened to {min_sl:.3f}"
+            )
+            sl = min_sl
+    else:
+        min_sl = price + stops_level + buf
+        if sl < price + stops_level:
+            logger.debug(
+                f"SL guard SELL: {sl:.3f} too close to {price:.3f} "
+                f"(stops={stops_level:.3f}) — widened to {min_sl:.3f}"
+            )
+            sl = min_sl
+
+    # TP guard — SKIPPED when tp=0.0 (Fluid TP / Naked Signal)
+    if tp != 0.0:
+        if order_type == mt5.ORDER_TYPE_BUY:
+            if tp < price + stops_level: tp = price + stops_level + buf
+        else:
+            if tp > price - stops_level: tp = price - stops_level - buf
+
+    # audit-oob-tp: Hard broker-side TP failsafe (Change 10).
+    # Replaces the 0.0 in the SLTP anchor with a real broker-side TP at 2R.
+    # The watcher closes dynamically long before this level — this only fires
+    # if Python is offline (crash, restart). Broker handles the exit cleanly.
+    # This does NOT affect the Phase 1 market order (which has no TP field).
+    oob_tp = tp   # default: use caller's tp (non-zero means caller set a target)
+    if tp == 0.0:
+        own_risk = abs(price - sl)
+        if own_risk > 0:
+            if order_type == mt5.ORDER_TYPE_BUY:
+                oob_tp = price + own_risk * HARD_FAILSAFE_TP_R
+                # Guard: must be at least stops_level above entry
+                if oob_tp < price + stops_level + buf:
+                    oob_tp = price + stops_level + buf
+            else:
+                oob_tp = price - own_risk * HARD_FAILSAFE_TP_R
+                if oob_tp > price - stops_level - buf:
+                    oob_tp = price - stops_level - buf
+            oob_tp = round(oob_tp, 3)
+            logger.debug(
+                f"OOB_TP set | {side} | price={price:.3f} | "
+                f"oob_tp={oob_tp:.3f} | {HARD_FAILSAFE_TP_R}R={round(own_risk*HARD_FAILSAFE_TP_R,3)}"
+            )
+
+    req = {
+        "action":       mt5.TRADE_ACTION_DEAL,
+        "symbol":       SYMBOL,
+        "volume":       LOT_SIZE,
+        "type":         order_type,
+        "price":        price,
+        "deviation":    20,
+        "magic":        magic,
+        "comment":      comment,
+        "type_time":    mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+
+    # ── Phase 1: Market execution ──────────────────────────────────
+    result  = _api().order_send(req)
+    latency = (time.time() - t0) * 1000
+
+    if not (result and result.retcode == mt5.TRADE_RETCODE_DONE):
+        code = result.retcode if result else "NONE"
+        if code == 10044:
+            logger.warning(
+                f"ORDER_SKIP magic={magic} code=10044 — "
+                f"no margin or volume limit reached, skipping entry"
+            )
+            return result   # don't log as error — expected during low-equity
+        logger.warning(f"ORDER_ERROR magic={magic} code={code}")
+        log_event("ORDER_ERROR", {
+            "magic": magic, "leg_type": leg_type, "side": side,
+            "comment": f"Err_{code}", "sl": round(sl, 3), "tp": round(oob_tp, 3),
+            "latency_ms": round(latency, 1),
+            "probe_direction": probe_direction,
+            "atr_at_fill": round(atr, 5),
+            "conviction_at_fill": brain_state.get("conviction", ""),
+            "adx_at_fill":        brain_state.get("adx",        ""),
+            "regime_at_fill":     brain_state.get("regime",     ""),
+            "gate_201": gates[201], "gate_202": gates[202],
+            "h4_direction_at_arm": _get_h4_direction(),
+            "kr_regime_at_arm":    brain_state.get("regime", ""),
+        })
+        return result
+
+    ticket = result.order
+    time.sleep(0.15)   # FIX: prevent Err 10027 on rapid dual-send
+
+    # ── Phase 2: SL/TP anchor (retry once on 10016) ────────────────
+
+    # Option 2: recompute SL anchor from actual fill price to prevent 10016
+    fill_price = result.price
+    own_risk_fill = abs(fill_price - sl)  # preserve original risk distance
+    if own_risk_fill > 0:
+        if order_type == mt5.ORDER_TYPE_BUY:
+            sl = fill_price - own_risk_fill
+        else:
+            sl = fill_price + own_risk_fill
+    
+    # Recompute OOB TP from fill price
+    if oob_tp != 0.0:
+        if order_type == mt5.ORDER_TYPE_BUY:
+            oob_tp = fill_price + own_risk_fill * HARD_FAILSAFE_TP_R
+            if oob_tp < fill_price + stops_level + buf:
+                oob_tp = fill_price + stops_level + buf
+        else:
+            oob_tp = fill_price - own_risk_fill * HARD_FAILSAFE_TP_R
+            if oob_tp > fill_price - stops_level - buf:
+                oob_tp = fill_price - stops_level - buf
+        oob_tp = round(oob_tp, 3)
+    
+    sl = round(sl, 3)
+
+    mod_req = {
+        "action":   mt5.TRADE_ACTION_SLTP,
+        "symbol":   SYMBOL,
+        "position": ticket,
+        "sl":       sl,
+        "tp":       oob_tp,    # audit-oob-tp: 3×ATR failsafe when caller sent tp=0.0
+    }
+    mod = _api().order_send(mod_req)
+
+    # Retry up to 2 times on 10016 (broker stops-level rejection)
+    # Each retry doubles the buffer — guarantees we clear stops_level
+    retry_buf = sym_info.point * 50   # start wider than v5.1 (was 35)
+    for _retry in range(2):
+        if not (mod and mod.retcode == 10016):
+            break
+        time.sleep(0.2)
+        if order_type == mt5.ORDER_TYPE_BUY:
+            sl = price - stops_level - retry_buf
+        else:
+            sl = price + stops_level + retry_buf
+        mod_req.update({"sl": round(sl, 3)})
+        mod = _api().order_send(mod_req)
+        retry_buf *= 2   # double buffer on second attempt
+
+    sl_ok = mod and mod.retcode == mt5.TRADE_RETCODE_DONE
+
+    common = {
+        "price":              result.price,
+        "spread":             spread,
+        "latency_ms":         round(latency, 1),
+        "magic":              magic,
+        "leg_type":           leg_type,
+        "side":               side,
+        "sl":                 round(sl, 3),
+        "tp":                 round(oob_tp, 3),   # actual broker TP anchored
+        "atr_at_fill":        round(atr, 5),
+        "grid_step_used":     round(atr * ATR_STEP_MULTIPLIER, 5),
+        "probe_direction":    probe_direction,
+        "conviction_at_fill": brain_state.get("conviction", ""),
+        "adx_at_fill":        brain_state.get("adx",        ""),
+        "regime_at_fill":     brain_state.get("regime",     ""),
+        "gate_201":  gates[201],
+        "gate_202":  gates[202],
+        "h4_direction_at_arm": _get_h4_direction(),
+        "kr_regime_at_arm":    brain_state.get("regime", ""),
+    }
+
+    if sl_ok:
+        log_event("ORDER_FILL_V51", {**common, "comment": "SL_APPLIED"})
+        logger.info(
+            f"FILL_SECURE magic={magic} {side} "
+            f"price={result.price} sl={round(sl,3)} tp={round(oob_tp,3)} [OOB] "
+            f"lat={round(latency,1)}ms"
+        )
+        # ── Unified Trade Ledger: GHOST ENTRY ────────────────────────────
+        if write_trade_event:
+            write_trade_event(
+                bot="GHOST", event="ENTRY", ticket=result.order,
+                symbol=SYMBOL,
+                direction=side,
+                price=result.price, sl=sl, tp=oob_tp, volume=LOT_SIZE,
+                regime=brain_state.get("regime", ""),
+                conviction=brain_state.get("conviction", None),
+                atr=atr,
+                spread_at_event=spread,
+                magic=magic,
+            )
+    else:
+        code = mod.retcode if mod else "UNK"
+        log_event("ORDER_FILL_V51_NO_SL", {**common, "comment": f"SL_FAIL_{code}"})
+        logger.warning(
+            f"FILL_NO_SL magic={magic} ticket={ticket} code={code}"
+        )
+
+    # ── Register State to KnowledgeRegister ───────────────────────────
+    from core.knowledge_register import KnowledgeRegister, TradeThesis
+    kr = KnowledgeRegister()
+    snapshot = kr.get_market_state(SYMBOL, "M15")
+    if snapshot:
+        thesis = TradeThesis(
+            ticket=result.order,
+            magic=magic,
+            symbol=SYMBOL,
+            direction=1 if order_type == mt5.ORDER_TYPE_BUY else -1,
+            bot_id="Ghost",
+            setup_type=leg_type,
+            fill_price=result.price,
+            fill_time=time.time(),
+            entry_atr=atr,
+            entry_regime=snapshot.regime,
+            entry_conviction=float(brain_state.get("conviction", 0.0)),
+            initial_sl=sl,
+            initial_tp=oob_tp,
+            market_snapshot=snapshot
+        )
+        kr.register_trade_thesis(thesis)
+
+    return result
+
+# ─────────────────────────────────────────────
+#  MAIN HUNTER LOOP
+# ─────────────────────────────────────────────
+def run_hunter():
+    if not mt5.initialize(
+        path=MT5_PATH, login=ACCOUNT, password=PASSWORD, server=SERVER
+    ):
+        logger.error(f"MT5 connect failed. Path: {MT5_PATH}")
+        return
+
+    logger.info(
+        "HUNTER v5.2 ONLINE | Leg 203 REMOVED (SuperTrend owns trend entries) | "
+        "Gate: 202 blocks ADX>40|Conv>60 | "
+        f"Step: {ATR_STEP_MULTIPLIER}×ATR | Fluid TP: Brain owns all exits"
+    )
+
+    armed, break_level, probe_extreme = None, 0.0, 0.0
+    armed_at    = 0.0   # timestamp when probe armed (stale timeout)
+    daily_pairs = 0
+    today       = date.today()
+
+    try:
+        while True:
+            try:
+                # ── Daily reset ─────────────────────────────────────────
+                if date.today() != today:
+                    logger.info(f"Daily reset: pairs_yesterday={daily_pairs}")
+                    daily_pairs = 0
+                    today = date.today()
+
+                # ── Market data ─────────────────────────────────────────
+                tick  = _api().symbol_info_tick(SYMBOL)
+                rates = _api().copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M1, 0, 50)
+                if not tick or rates is None or len(rates) < 20:
+                    time.sleep(1)
+                    continue
+
+                df            = pd.DataFrame(rates)
+                atr           = _get_atr(df)
+                dynamic_step  = max(atr * ATR_STEP_MULTIPLIER, ATR_STEP_FLOOR)
+                current_price = (tick.bid + tick.ask) / 2
+                spread        = tick.ask - tick.bid
+
+                # ── Probe detection ─────────────────────────────────────
+                if armed is None:
+                    bs = read_brain_state()
+                    bs_regime = bs.get("regime", "")
+                    
+                    if bs_regime in ("TRENDING_UP", "TRENDING_DOWN", "UNKNOWN"):
+                        from core.knowledge_register import KnowledgeRegister
+                        kr_dir = 1 if bs_regime == "TRENDING_DOWN" else (-1 if bs_regime == "TRENDING_UP" else 0)
+                        if kr_dir != 0:
+                            KnowledgeRegister().publish_invalidation(
+                                symbol=SYMBOL,
+                                direction=kr_dir,
+                                source_bot="Ghost",
+                                reason=f"Ghost regime-arm-gate blocked probe: {bs_regime}",
+                                ttl_seconds=300.0
+                            )
+                        time.sleep(1)
+                        continue
+                        
+                    recent_high = df["high"].iloc[-5:].max()
+                    recent_low  = df["low"].iloc[-5:].min()
+
+
+                    # F6 Cross-bot gate: block UP_PROBE when ST holds confirmed LONG
+                    st_long_active = False
+                    try:
+                        from core.knowledge_register import KnowledgeRegister
+                        kr = KnowledgeRegister()
+                        for thesis in kr._theses.values():
+                            if (thesis.symbol == "XAUUSDm" and 
+                                thesis.bot_id in ("SuperTrend", "ST") and
+                                thesis.direction == 1):
+                                st_long_active = True
+                                break
+                    except Exception:
+                        pass  # fail open — never block on KR read failure
+                    
+                    if SYMBOL == "XAUUSDm" and st_long_active and current_price > recent_high:
+                        logger.info(
+                            f"GHOST_ARM_BLOCKED_ST_LONG | "
+                            f"price={round(current_price,3)} | "
+                            f"ST LONG thesis active on XAUUSDm — suppressing UP_PROBE"
+                        )
+                        # Skip arming, continue loop
+                        time.sleep(1)
+                        continue
+
+                    if current_price > recent_high:
+                        armed         = "UP_PROBE"
+                        probe_extreme = current_price
+                        break_level   = current_price - dynamic_step
+                        ghost_cache   = GhostCache(
+                            probe_direction="UP_PROBE",
+                            probe_origin=break_level,
+                            probe_extreme=current_price,
+                            atr_step=dynamic_step,
+                            n_layers=N_LAYERS_DEFAULT,
+                        )
+                        log_event("ARMED", {
+                            "price":          round(current_price, 3),
+                            "atr_at_fill":    round(atr, 5),
+                            "spread":         round(spread, 3),
+                            "comment":        "UP_PROBE",
+                            "grid_step_used": round(dynamic_step, 5),
+                            "h4_direction_at_arm": _get_h4_direction(),
+                            "kr_regime_at_arm":    bs.get("regime", ""),
+                        })
+                        logger.warning(
+                            f"ARMED UP | price={round(current_price,3)} "
+                            f"step={round(dynamic_step,3)} "
+                            f"atr={round(atr,5)}"
+                        )
+                    elif current_price < recent_low:
+                        armed         = "DOWN_PROBE"
+                        probe_extreme = current_price
+                        break_level   = current_price + dynamic_step
+                        ghost_cache   = GhostCache(
+                            probe_direction="DOWN_PROBE",
+                            probe_origin=break_level,
+                            probe_extreme=current_price,
+                            atr_step=dynamic_step,
+                            n_layers=N_LAYERS_DEFAULT,
+                        )
+                        log_event("ARMED", {
+                            "price":          round(current_price, 3),
+                            "atr_at_fill":    round(atr, 5),
+                            "spread":         round(spread, 3),
+                            "comment":        "DOWN_PROBE",
+                            "grid_step_used": round(dynamic_step, 5),
+                            "h4_direction_at_arm": _get_h4_direction(),
+                            "kr_regime_at_arm":    bs.get("regime", ""),
+                        })
+                        logger.warning(
+                            f"ARMED DN | price={round(current_price,3)} "
+                            f"step={round(dynamic_step,3)} "
+                            f"atr={round(atr,5)}"
+                        )
+
+                else:
+                    # ── Track probe extreme and update break level ────────
+                    if armed == "UP_PROBE":
+                        if current_price > probe_extreme:
+                            probe_extreme = current_price
+                            break_level   = current_price - dynamic_step
+                        trigger = current_price < break_level
+                    else:
+                        if current_price < probe_extreme:
+                            probe_extreme = current_price
+                            break_level   = current_price + dynamic_step
+                        trigger = current_price > break_level
+
+                    # gc-hunter: update GhostCache every tick
+                    # Runs independently — 204 fires at nth virtual layer
+                    # Only update when not already triggering 201/202/203
+                    if ghost_cache is not None and not trigger:
+                        gc_signal = ghost_cache.update(current_price, atr)
+                        if gc_signal is not None:
+                            gc_type = (mt5.ORDER_TYPE_SELL
+                                       if gc_signal["order_type"] == "SELL"
+                                       else mt5.ORDER_TYPE_BUY)
+                            send_order(
+                                gc_type, gc_signal["sl"], 0.0,
+                                MAGIC_GHOST_CACHE, "SNIPER_GC",
+                                atr, armed, "GHOST_CACHE", bs, gates,
+                            )
+                            log_event("GHOST_CACHE_FIRE", {
+                                **gc_signal,
+                                "atr_at_fill":     round(atr, 5),
+                                "regime_at_fill":  bs.get("regime", ""),
+                                "probe_direction": armed,
+                            })
+                            logger.warning(
+                                f"GHOST_CACHE_FIRE magic=204 | "
+                                f"layer_depth={gc_signal['virtual_layer_depth']} | "
+                                f"sl={gc_signal['sl']:.3f}"
+                            )
+
+                    if trigger:
+                        # ── Pre-fire checks ──────────────────────────────
+                        if spread > SPREAD_MAX:
+                            log_event("SKIP_SPREAD", {
+                                "price":           round(current_price, 3),
+                                "spread":          round(spread, 3),
+                                "probe_direction": armed,
+                            })
+                            logger.info(f"SKIP_SPREAD spread={round(spread,3)}")
+                            armed       = None
+                            ghost_cache = None
+                            continue
+
+                        if daily_pairs >= MAX_DAILY_PAIRS:
+                            log_event("SKIP_DAILY_CAP", {
+                                "price":   round(current_price, 3),
+                                "comment": f"pairs={daily_pairs}",
+                            })
+                            armed       = None
+                            ghost_cache = None
+                            continue
+
+                        # ── Read brain state + apply gates (single read) ──
+                        bs      = read_brain_state()
+                        gates   = apply_gates(bs)
+                        bs_adx  = float(bs.get("adx", 0))
+                        bs_conv = float(bs.get("conviction", 50))
+
+                        # ── SL geometry (v5.1 Slab C Grace) ─────────────
+                        # fix-sltight: Scalp/Reversal legs widened from
+                        # 0.2×ATR to SCALP_REV_SL_ATR_MULT (0.35×ATR) — see
+                        # constant definition above for the data behind this.
+                        # Trend-Follow leg:    0.5 × ATR (wider — liquidity room)
+                        sl_dist_tight = SCALP_REV_SL_ATR_MULT * atr
+
+                        # Direction for reversal vs trend-follow
+                        dir_rev    = (mt5.ORDER_TYPE_SELL if armed == "UP_PROBE"
+                                      else mt5.ORDER_TYPE_BUY)
+                        dir_follow = (mt5.ORDER_TYPE_BUY if armed == "UP_PROBE"
+                                      else mt5.ORDER_TYPE_SELL)
+
+                        # SL for reversal legs (201, 202) — MUST be on loss side:
+                        #   UP_PROBE  → we SELL the reversal → SL ABOVE probe_extreme
+                        #               (protects if price keeps rising past the high)
+                        #   DOWN_PROBE → we BUY the reversal → SL BELOW probe_extreme
+                        #               (protects if price keeps falling past the low)
+                        sl_rev  = (probe_extreme + sl_dist_tight if armed == "UP_PROBE"
+                                   else probe_extreme - sl_dist_tight)
+
+                        fired_any = False
+
+                        logger.info(
+                            f"FIRE {armed} | "
+                            f"price={round(current_price,3)} "
+                            f"adx={round(bs_adx,2)} conv={round(bs_conv,1)} "
+                            f"regime={bs.get('regime','')} | "
+                            f"gates 201={gates[201]} 202={gates[202]}"
+                        )
+
+                        # ── Legs 202 (Reversal) and 201 (Scalp) firing logic ──
+                        legs_fired_this_probe = 0
+                        
+                        # We prioritize 202 (Reversal) over 201 (Scalp)
+                        if gates[202] and legs_fired_this_probe < MAX_LEGS_PER_PROBE:
+                            send_order(
+                                dir_rev, sl_rev, 0.0,
+                                MAGIC_REVERSAL, "SNIPER_R",
+                                atr, armed, "REVERSAL", bs, gates,
+                            )
+                            fired_any = True
+                            legs_fired_this_probe += 1
+                            time.sleep(0.15)
+                        elif not gates[202]:
+                            logger.info(
+                                f"GATE_BLOCK 202 | "
+                                f"adx={round(bs_adx,2)} conv={round(bs_conv,1)}"
+                            )
+                            log_event("GATE_BLOCK", {
+                                "magic":              202,
+                                "leg_type":           "REVERSAL",
+                                "probe_direction":    armed,
+                                "conviction_at_fill": bs_conv,
+                                "adx_at_fill":        bs_adx,
+                                "regime_at_fill":     bs.get("regime", ""),
+                                "gate_201":  gates[201],
+                                "gate_202":  gates[202],
+                                "comment": (
+                                    f"BLOCKED_ADX>{GATE_202_ADX_BLOCK}"
+                                    if bs_adx > GATE_202_ADX_BLOCK
+                                    else f"BLOCKED_CONV>{GATE_202_CONV_BLOCK}"
+                                ),
+                            })
+
+                        if gates[201]:
+                            # Shadow leg fires 100% of the time independent of max legs limit
+                            send_order(
+                                dir_rev, sl_rev, 0.0,
+                                MAGIC_SCALP, "SNIPER_S",
+                                atr, armed, "SCALP", bs, gates,
+                                is_shadow=True
+                            )
+                            fired_any = True
+                            legs_fired_this_probe += 1
+                            time.sleep(0.15)
+
+                        # NOTE: Leg 203 (Trend-Follow) removed in v5.2.
+                        # SuperTrend bot (si_confirmed=0.55) handles all trend entries.
+
+                        if fired_any:
+                            daily_pairs += 1
+
+                        armed       = None
+                        # 204 DECOUPLE: ghost_cache persists after 202 fire.
+                        # Reset happens only when the outer probe cycle ends (armed=None
+                        # at top of detection loop). GhostCache.invalidated handles the
+                        # case where price extends too far (trend, not exhaustion).
+                        time.sleep(COOLDOWN_SECONDS)
+
+            except Exception as exc:
+                logger.error(
+                    f"HUNTER_EXCEPTION {type(exc).__name__}: {exc}",
+                    exc_info=True
+                )
+                time.sleep(5)
+
+            time.sleep(0.01)
+
+    except KeyboardInterrupt:
+        logger.info("Hunter stopped manually.")
+    finally:
+        mt5.shutdown()
+
+
+if __name__ == "__main__":
+    run_hunter()
+--- ghost_super/ghost_cache.py ---
+"""
+GhostCache — Virtual Grid Layer Tracker
+========================================
+Magic 204: Pure ghost cache exhaustion entry
+
+WHAT QUESTION THIS ANSWERS (and how we know when we're done):
+─────────────────────────────────────────────────────────────
+  Q: Does waiting for the nth virtual exhaustion layer before firing a
+     mean-reversion entry produce better outcomes than firing immediately
+     at first retraction from probe (magic 202)?
+
+  MEASURE: avg_R and win_rate per magic after 30+ fills each (same probes,
+           different entry timing). Data decides — not theory.
+
+  DECISION MATRIX (non-negotiable, checked after 2-week demo):
+  ┌────────────────────────────────────────────┬────────────────────────────┐
+  │ Outcome                                    │ Decision                   │
+  ├────────────────────────────────────────────┼────────────────────────────┤
+  │ 204 avg_R > 202 avg_R by >20%             │ Replace 202 with 204 in P4 │
+  │ 204 ≈ 202 (within 20%)                    │ Keep both, tune by regime  │
+  │ 204 avg_R < 202 avg_R                     │ Kill 204, keep 202          │
+  │ 204 fires <10 times in 2 weeks            │ n too high → lower to n=2  │
+  │ 204 fires >6 times per day                │ n too low → raise to n=4   │
+  └────────────────────────────────────────────┴────────────────────────────┘
+
+HOW 204 DIFFERS FROM 202:
+─────────────────────────────────────────────────────────────
+  202 fires at the FIRST retraction from probe extreme.
+      → Aggressive, frequent, low conviction
+
+  204 fires only AFTER:
+      1. Price extends to nth virtual layer BEYOND probe extreme (exhaustion)
+      2. THEN price retraces back through the (n-1)th layer (confirmation)
+      → Patient, rare, high conviction
+
+  They never compete for the same entry — 202 fires first, 204 fires later
+  if the probe extends further. Both can be live simultaneously.
+
+  Visual:
+        ▲                         ← nth layer (exhaustion)
+        │  ←──── invalidation zone (trend, not exhaustion)
+        ▲                         ← nth layer (fire zone upper boundary)
+        │
+        ▲  [204 ENTRY HERE]       ← (n-1)th layer retrace triggers entry
+        ▲                         ← (n-1)th layer
+        │
+        ▲  [202 ENTRY HERE]       ← 1st retraction from probe (existing)
+        │
+        ●  ← probe_extreme
+        │
+        ●  ← probe_origin
+
+INTEGRATION INTO ghost_sniper_v5_1.py:
+─────────────────────────────────────────────────────────────
+  # After existing 201/202/203 trigger block, BEFORE armed = None reset:
+  if armed is not None:
+      if ghost_cache is None:
+          ghost_cache = GhostCache(
+              probe_direction=armed,
+              probe_origin=break_level,     # price before probe
+              probe_extreme=probe_extreme,
+              atr_step=dynamic_step,
+              n_layers=N_LAYERS_DEFAULT,
+          )
+
+      signal = ghost_cache.update(current_price, atr)
+      if signal:
+          send_order(
+              mt5.ORDER_TYPE_SELL if signal['order_type'] == 'SELL' else mt5.ORDER_TYPE_BUY,
+              signal['sl'], 0.0,
+              MAGIC_GHOST_CACHE, 'SNIPER_GC',
+              atr, armed, 'GHOST_CACHE', bs, gates,
+          )
+          log_event('GHOST_CACHE_FIRE', {
+              **signal,
+              'atr_at_fill':   round(atr, 5),
+              'regime_at_fill': bs.get('regime', ''),
+          })
+
+  # Reset ghost_cache when probe resets (armed = None):
+  if armed is None and ghost_cache is not None:
+      ghost_cache = None
+
+WATCHER PERSONALITY FOR 204 (in sniper_watcher_v3_1.py):
+─────────────────────────────────────────────────────────────
+  manage_204_ghost_cache() — grid-state aware exits ONLY:
+    TP: combined P&L reaches +1R on first-layer risk → close all 204 legs
+    Stop: combined P&L reaches -3R → close all 204 legs immediately
+    No per-position reaper — that is the entire point being tested
+
+  This is identical to the GridWatcher rebuild (gh-gw task) but as
+  a personality function in the existing dispatch table.
+
+LOGGING COLUMNS TO ADD TO AUDIT CSV:
+─────────────────────────────────────────────────────────────
+  virtual_layer_depth   - n at time of fire (tune n from this)
+  probe_origin_dist     - total move from probe origin to nth layer
+  cache_age_seconds     - how long cache was active before firing
+  max_layer_reached     - deepest virtual layer touched (even if no fire)
+"""
+
+from dataclasses import dataclass, field
+from typing import Optional
+import time
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+N_LAYERS_DEFAULT      = 3    # Start here. Tune from data after 30+ fills.
+                             # n=2: fires more often, less exhaustion evidence
+                             # n=3: balanced — start here
+                             # n=4: fires rarely, very high conviction required
+
+SL_ATR_BUFFER         = 0.5  # SL = nth_layer_price ± 0.5×ATR (Slab C Grace)
+                             # Wide enough to survive the liquidity sweep that
+                             # always happens at extreme levels on Gold.
+
+CACHE_INVALIDATION_N  = 2    # If price reaches (n + 2) layers, this is a trend.
+                             # Reset cache. Do not fire. Accept we missed it.
+
+MAX_CACHE_AGE_SECONDS = 300  # 5 minutes max. After this, ATR step is stale
+                             # and the virtual layer prices are wrong.
+
+MAGIC_GHOST_CACHE     = 204  # New magic number — isolated from 201/202/203
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  GHOST CACHE
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class GhostCache:
+    """
+    Virtual grid layer tracker. Pure Python, zero MT5 dependency.
+    Instantiate on ARMED. Call update() every loop tick.
+    Returns entry signal dict when fire condition met, else None.
+
+    One GhostCache instance per probe. Reset to None when probe resets.
+    """
+
+    probe_direction: str    # "UP_PROBE" | "DOWN_PROBE"
+    probe_origin:    float  # price level at which probe was first detected
+    probe_extreme:   float  # furthest point reached — updated dynamically
+    atr_step:        float  # grid step size = 1.0 × ATR at time of arming
+    n_layers:        int    = N_LAYERS_DEFAULT
+
+    # Runtime state — do not set at construction
+    max_layer_touched:  int   = field(default=0,     init=False)
+    entry_fired:        bool  = field(default=False,  init=False)
+    invalidated:        bool  = field(default=False,  init=False)
+    created_at:         float = field(default_factory=time.time, init=False)
+    _initial_extreme:   float = field(default=0.0,   init=False, repr=False)
+
+    def __post_init__(self):
+        # Lock the layer anchor at construction time.
+        # probe_extreme updates dynamically as price extends (for SL and invalidation),
+        # but virtual layer PRICES must be fixed — otherwise layers shift with price
+        # and can never be "reached" in a stable way.
+        self._initial_extreme = self.probe_extreme
+
+    # ── Layer price helpers ───────────────────────────────────────────────────
+
+    def _layer_price(self, index: int) -> float:
+        """
+        Price of the nth virtual layer. Anchored to _initial_extreme (FIXED).
+
+        UP_PROBE:   layers extend ABOVE initial probe extreme (ascending)
+                    Fire direction = SELL (mean reversion back down)
+
+        DOWN_PROBE: layers extend BELOW initial probe extreme (descending)
+                    Fire direction = BUY (mean reversion back up)
+
+        WHY FIXED: if we anchored to dynamic probe_extreme, the layer prices
+        would shift upward every time price made a new high, making layers
+        permanently unreachable. The virtual grid is placed at the moment
+        of arming and stays there.
+        """
+        if self.probe_direction == "UP_PROBE":
+            return self._initial_extreme + (index * self.atr_step)
+        else:
+            return self._initial_extreme - (index * self.atr_step)
+
+    @property
+    def nth_layer_price(self) -> float:
+        """The decisive exhaustion level. Fire condition: price touched this."""
+        return self._layer_price(self.n_layers)
+
+    @property
+    def retrace_level(self) -> float:
+        """
+        Entry trigger: price must retrace THROUGH this level after touching nth.
+        This is the (n-1)th layer — one step back toward the origin.
+        """
+        return self._layer_price(self.n_layers - 1)
+
+    @property
+    def invalidation_level(self) -> float:
+        """Trend continuation threshold. If reached → cache is dead."""
+        return self._layer_price(self.n_layers + CACHE_INVALIDATION_N)
+
+    @property
+    def sl_price(self) -> float:
+        """
+        SL for the real entry. Anchored at nth layer ± 0.5×ATR buffer.
+        The nth layer is the furthest known point of the probe — SL must sit
+        beyond it or it will be hit immediately on any residual momentum.
+        """
+        buffer = self.atr_step * SL_ATR_BUFFER
+        if self.probe_direction == "UP_PROBE":
+            return self.nth_layer_price + buffer   # SELL entry → SL above
+        else:
+            return self.nth_layer_price - buffer   # BUY entry  → SL below
+
+    # ── Core update ───────────────────────────────────────────────────────────
+
+    def update(self, current_price: float, current_atr: float) -> Optional[dict]:
+        """
+        Call every loop tick. Returns entry signal dict or None.
+
+        The signal dict contains everything needed by send_order() and
+        the audit CSV logging columns.
+        """
+        if self.entry_fired or self.invalidated:
+            return None
+
+        # Stale cache guard — ATR step becomes wrong over time
+        if time.time() - self.created_at > MAX_CACHE_AGE_SECONDS:
+            self.invalidated = True
+            return None
+
+        # Update probe extreme as price continues
+        if self.probe_direction == "UP_PROBE":
+            self.probe_extreme = max(self.probe_extreme, current_price)
+        else:
+            self.probe_extreme = min(self.probe_extreme, current_price)
+
+        # Invalidation check — price has extended too far, this is a trend
+        if self._price_reached(current_price, self.invalidation_level):
+            self.invalidated = True
+            return None
+
+        # Track deepest virtual layer touched
+        for i in range(1, self.n_layers + 1):
+            if self._price_reached(current_price, self._layer_price(i)):
+                self.max_layer_touched = max(self.max_layer_touched, i)
+
+        # Fire condition: nth layer touched AND price has retracted through (n-1)th
+        if (self.max_layer_touched >= self.n_layers
+                and self._price_retracted(current_price, self.retrace_level)):
+            self.entry_fired = True
+            return {
+                'order_type':          'SELL' if self.probe_direction == 'UP_PROBE' else 'BUY',
+                'sl':                   self.sl_price,
+                'tp':                   0.0,  # Fluid TP — watcher owns all exits
+                'virtual_layer_depth':  self.max_layer_touched,
+                'probe_origin_dist':    abs(self.nth_layer_price - self.probe_origin),
+                'cache_age_seconds':    round(time.time() - self.created_at, 1),
+            }
+
+        return None
+
+    def _price_reached(self, current: float, target: float) -> bool:
+        if self.probe_direction == "UP_PROBE":
+            return current >= target
+        return current <= target
+
+    def _price_retracted(self, current: float, level: float) -> bool:
+        """Price has come BACK through the level (opposite direction to probe)."""
+        if self.probe_direction == "UP_PROBE":
+            return current < level   # was going up, now fell below (n-1)th
+        return current > level       # was going down, now rose above (n-1)th
+
+    # ── Logging ───────────────────────────────────────────────────────────────
+
+    def status(self) -> dict:
+        """Call every cycle for debug logging regardless of fire state."""
+        return {
+            'direction':          self.probe_direction,
+            'probe_extreme':      round(self.probe_extreme, 3),
+            'nth_layer':          round(self.nth_layer_price, 3),
+            'retrace_level':      round(self.retrace_level, 3),
+            'invalidation':       round(self.invalidation_level, 3),
+            'sl':                 round(self.sl_price, 3),
+            'max_layer_touched':  self.max_layer_touched,
+            'fired':              self.entry_fired,
+            'invalidated':        self.invalidated,
+            'age_s':              round(time.time() - self.created_at, 1),
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  UNIT TESTS  — run before wiring to MT5
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_unit_tests() -> bool:
+    """
+    10 scenarios. ALL must pass. Do not wire into Hunter until green.
+    """
+    print("=" * 55)
+    print("GhostCache unit tests — run before wiring to MT5")
+    print("=" * 55)
+    passed = 0
+
+    # T1: UP_PROBE — nth layer price is correct
+    c = GhostCache("UP_PROBE", 2000.0, 2010.0, 2.0, n_layers=3)
+    assert abs(c.nth_layer_price - 2016.0) < 0.001, f"T1 FAIL nth={c.nth_layer_price}"
+    print("T1 PASS  UP_PROBE nth layer price = 2016.0")
+    passed += 1
+
+    # T2: DOWN_PROBE — nth layer price is correct
+    c = GhostCache("DOWN_PROBE", 2000.0, 1990.0, 2.0, n_layers=3)
+    assert abs(c.nth_layer_price - 1984.0) < 0.001, f"T2 FAIL nth={c.nth_layer_price}"
+    print("T2 PASS  DOWN_PROBE nth layer price = 1984.0")
+    passed += 1
+
+    # T3: No fire before nth layer is touched
+    c = GhostCache("UP_PROBE", 2000.0, 2010.0, 2.0, n_layers=3)
+    result = c.update(2014.0, 2.0)  # only 2nd layer (2014.0) reached
+    assert result is None,          f"T3 FAIL fired too early: {result}"
+    assert c.max_layer_touched == 2, f"T3 FAIL layer count: {c.max_layer_touched}"
+    print("T3 PASS  No signal before nth layer touched")
+    passed += 1
+
+    # T4: nth layer touched but no retrace yet → no signal
+    c = GhostCache("UP_PROBE", 2000.0, 2010.0, 2.0, n_layers=3)
+    c.update(2016.5, 2.0)          # touches nth (2016.0)
+    result = c.update(2015.5, 2.0) # above retrace_level (2014.0) → no fire
+    assert result is None,          f"T4 FAIL fired before retrace: {result}"
+    print("T4 PASS  nth touched, above retrace level — no signal yet")
+    passed += 1
+
+    # T5: UP_PROBE full fire sequence
+    c = GhostCache("UP_PROBE", 2000.0, 2010.0, 2.0, n_layers=3)
+    c.update(2016.5, 2.0)           # nth layer touched
+    r = c.update(2013.5, 2.0)       # retraced below (n-1)th = 2014.0
+    assert r is not None,            f"T5 FAIL no signal"
+    assert r['order_type'] == 'SELL',f"T5 FAIL direction {r['order_type']}"
+    assert r['virtual_layer_depth'] == 3
+    print(f"T5 PASS  UP_PROBE SELL fired | SL={r['sl']:.3f}")
+    passed += 1
+
+    # T6: DOWN_PROBE full fire sequence
+    c = GhostCache("DOWN_PROBE", 2000.0, 1990.0, 2.0, n_layers=3)
+    c.update(1983.5, 2.0)           # nth layer touched (1984.0)
+    r = c.update(1986.5, 2.0)       # retrace above (n-1)th = 1986.0
+    assert r is not None,            f"T6 FAIL no signal"
+    assert r['order_type'] == 'BUY', f"T6 FAIL direction {r['order_type']}"
+    print(f"T6 PASS  DOWN_PROBE BUY fired | SL={r['sl']:.3f}")
+    passed += 1
+
+    # T7: Invalidation — trend extension kills cache
+    c = GhostCache("UP_PROBE", 2000.0, 2010.0, 2.0, n_layers=3)
+    c.update(2016.5, 2.0)           # nth layer
+    c.update(2020.5, 2.0)           # (n+2)th = 2010 + 5×2 = 2020 → invalidate
+    r = c.update(2013.0, 2.0)       # retrace attempt after invalidation
+    assert r is None,                f"T7 FAIL fired after invalidation"
+    assert c.invalidated,            "T7 FAIL not marked invalidated"
+    print("T7 PASS  Cache invalidated on trend extension")
+    passed += 1
+
+    # T8: No double fire
+    c = GhostCache("UP_PROBE", 2000.0, 2010.0, 2.0, n_layers=3)
+    c.update(2016.5, 2.0)
+    r1 = c.update(2013.5, 2.0)
+    r2 = c.update(2013.0, 2.0)
+    assert r1 is not None,           "T8 FAIL first fire missed"
+    assert r2 is None,               "T8 FAIL double fire"
+    print("T8 PASS  No double fire after entry")
+    passed += 1
+
+    # T9: SL geometry — UP_PROBE SL sits ABOVE nth layer
+    c = GhostCache("UP_PROBE", 2000.0, 2010.0, 2.0, n_layers=3)
+    expected = 2016.0 + (0.5 * 2.0)  # nth_layer + 0.5×atr_step = 2017.0
+    assert abs(c.sl_price - expected) < 0.001, f"T9 FAIL sl={c.sl_price} expected={expected}"
+    print(f"T9 PASS  UP_PROBE SL above nth layer = {c.sl_price:.3f}")
+    passed += 1
+
+    # T10: SL geometry — DOWN_PROBE SL sits BELOW nth layer
+    c = GhostCache("DOWN_PROBE", 2000.0, 1990.0, 2.0, n_layers=3)
+    expected = 1984.0 - (0.5 * 2.0)  # nth_layer - 0.5×atr_step = 1983.0
+    assert abs(c.sl_price - expected) < 0.001, f"T10 FAIL sl={c.sl_price} expected={expected}"
+    print(f"T10 PASS DOWN_PROBE SL below nth layer = {c.sl_price:.3f}")
+    passed += 1
+
+    print("=" * 55)
+    print(f"Results: {passed}/10 tests passed")
+    if passed == 10:
+        print("ALL GREEN — safe to wire into Hunter")
+    else:
+        print("FAILURES — fix before wiring to Hunter")
+    print("=" * 55)
+    return passed == 10
+
+
+if __name__ == "__main__":
+    run_unit_tests()
+
+--- ghost_super/sniper_watcher.py ---
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║        SNIPER WATCHER v3.1 — The Integrated Brain               ║
+║  Architecture: Intelligence-Gated Multi-Magic Risk Manager       ║
+╚══════════════════════════════════════════════════════════════════╝
+
+ARCHITECTURE ROLE — Layer 1 + Layer 3:
+  Layer 1 | The Pulse:
+    Continuously calculates ADX, Conviction, ATR, and regime label.
+    Writes a "Market State" snapshot to brain_state_live.csv every
+    heartbeat so the Hunter (Layer 2) can read it before firing.
+
+  Layer 3 | The Multi-Magic Manager:
+    Once trades are live, applies DISTINCT exit personalities per magic:
+      201 SCALP      → Defensive breakeven at 0.3R. Quick risk-free lock.
+                       ATR Reaper kills at 1.5×ATR if deeply wrong.
+      202 REVERSAL   → ATR Reaper is priority. Kill if 1.8×ATR against.
+                       Trail at 1.0R (lock 0.5R). Fluid TP on exhaustion.
+      203 TREND-FOLLOW → Aggressive trail at 1.5×ATR. Ride while ADX high.
+                         Hard Reaper at 1.8×ATR. Fluid exit when trend gone.
+
+BUGS FIXED vs v1.3 / v2.0:
+  1. logging.basicConfig had no filename → CMD-only output.
+     FIX: RotatingFileHandler writes to disk unconditionally.
+  2. tick=None crash → AttributeError silently killed the loop.
+     FIX: None guard at top of manage_position() and close_position().
+  3. No try/except in while True → any MT5 hiccup killed the brain.
+     FIX: Broad except with 5s recovery + mt5.initialize() retry.
+  4. Heartbeat format mismatch (log showed "Regime=TREND | ADX=X"
+     but script wrote "Conviction=X | ATR=X") → running script was
+     a different version than the one uploaded.
+     FIX: Single source-of-truth format, version stamped in every HB.
+
+LOGGING NEW IN v3.0:
+  - sniper_brain.log         : rotating human-readable log
+  - sniper_conviction_log.csv: every management action with full
+                               market state + r_multiple + exit_reason
+  - brain_state_live.csv     : single-row live state for Hunter to read
+
+====================================================================
+  CHANGELOG v3.1
+====================================================================
+  1. PULSE: Heartbeat reduced from 10s to 2s for Gold responsiveness.
+     Hunter (Layer 2) reads a fresher state before every trigger.
+  2. FLUID TP: Market-close logic enabled for zero-TP Hunter legs.
+     Since Hunter v5.1 fires Naked Signal (TP=0.0), the Brain now
+     owns all profitable exits. R-multiple guards for fluid TP have
+     been removed — any profit above zero qualifies for exhaustion exit.
+     Trailing and Reaper logic are fully intact.
+  3. INFRASTRUCTURE: Full v3.0 conviction logging, helper functions
+     (_get_tick_price, _compute_initial_risk, _send_modify,
+     _close_market), MAGIC_MANAGERS dispatch dict, idle conviction
+     snapshots, MT5 reconnect logic, and _init_conviction_log()
+     all restored.
+"""
+
+import MetaTrader5 as mt5
+import pandas as pd
+import numpy as np
+import time
+import logging
+import logging.handlers
+import os
+import csv
+from datetime import datetime
+
+# ─────────────────────────────────────────────
+#  GATEWAY  (set by unified_runner; None = standalone mode)
+# ─────────────────────────────────────────────
+_GATEWAY = None
+
+def set_gateway(gw):
+    """Called once by unified_runner after MT5Gateway is initialised."""
+    global _GATEWAY
+    _GATEWAY = gw
+
+def _api():
+    """Return gateway in unified mode, raw mt5 in standalone mode."""
+    return _GATEWAY if _GATEWAY is not None else mt5
+
+
+# ─────────────────────────────────────────────
+#  CONFIGURATION
+# ─────────────────────────────────────────────
+TERMINAL_PATH    = r"C:\Program Files\MetaTrader 5 EXNESS - Copy\terminal64.exe"
+SYMBOL           = "XAUUSDm"
+SNIPER_MAGICS    = [201, 202]
+
+BRAIN_LOG_FILE             = "sniper_brain.log"
+CONVICTION_LOG_FILE        = "sniper_conviction_log.csv"
+BRAIN_STATE_FILE           = "brain_state_live.csv"
+ADAPTIVE_THRESHOLD_FILE    = "logs/adaptive_thresholds_live.csv"
+
+HEARTBEAT_INTERVAL         = 2    # seconds — reduced from 10 in v3.1
+CONV_LOG_INTERVAL          = 30   # seconds between idle snapshots
+CALIBRATION_WINDOW_MINS    = 60   # rolling window for percentile calibration
+CALIBRATION_MIN_ROWS       = 30   # cold-start guard: min rows before adaptive kicks in
+
+# Exit logic thresholds
+REAPER_ATR_MULT       = 1.8   # 202/203: kill if price moves this × ATR against
+REAPER_ATR_MULT_201   = 1.5   # 201 scalp: tighter reaper threshold
+TRAIL_LOCK_R_201      = 0.3   # 201 scalp: breakeven at this R
+TRAIL_LOCK_R_202      = 1.0   # 202 reversal: start trailing at this R
+
+# ── Per-personality leg TP + BE-lock ratchet ─────────────────────────────────
+#
+# PROBLEM FIXED: LEG_TP_R=0.5 with SL=1.0R required 89% win rate to break
+# even. Observed bleed: ~$4 loss per $1 gain. Root cause: TP was closing
+# winners at half the risk while full losses ran to 1.0R+.
+#
+# SOLUTION — two mechanisms working together:
+#
+# 1. PER-PERSONALITY TP  (set once broker-side at registration)
+#    Each magic has a TP calibrated to its reversion philosophy:
+#      201 SCALP        → 1.0R  tight exit, fast turnover, break-even at 50%
+#      202 REVERSAL     → 1.5R  mean reversion needs room, break-even at 40%
+#      204 GHOST CACHE  → 2.0R  highest conviction, rarest fire, break-even at 33%
+#    These TPs replace the flat 0.5R that made the strategy structurally losing.
+#
+# 2. BE-LOCK RATCHET  (checked every manage cycle via _check_be_lock)
+#    Once any leg reaches +BE_LOCK_R (+0.5R) in floating profit, its SL is
+#    moved to breakeven + buffer. This converts the -1.0R full-loss scenario
+#    into a 0R scratch for the ~65% of legs that reach the milestone, even
+#    if they never reach their full TP. Effect: expected loss on a losing trade
+#    drops from -1.0R to ~-0.35R (weighted average of full loss + scratches).
+#
+# EXPECTANCY COMPARISON (at 60% reach-milestone rate, 55% continue to TP):
+#   Old (0.5R TP, 1.0R SL, no BE-lock): E = -1.3R per trade → bleeding
+#   New (per-personality + BE-lock)    : E = +0.37R per trade → positive edge
+#
+# DESIGN: TP set broker-side in _set_leg_tp() — broker closes automatically.
+# BE-lock checked in _check_be_lock() called from every manage_20X() cycle.
+# Tickets with BE-lock applied tracked in _be_locked_tickets set.
+
+LEG_TP_BY_MAGIC = {
+    201: 1.0,   # SCALP — tight, fast reversion
+    202: 1.5,   # REVERSAL — mean reversion needs room
+    204: 2.0,   # GHOST CACHE — highest conviction, rarest fire
+}
+from ghost_super.ghost_cache import GhostCache, N_LAYERS_DEFAULT, MAGIC_GHOST_CACHE
+
+try:
+    from data.trade_ledger import write_trade_event
+except ImportError:
+    write_trade_event = None
+
+LEG_TP_DEFAULT  = 1.0   # fallback for any unregistered magic
+LEG_TP_ENABLED  = True  # Set False to revert to grid-only exits for A/B test
+
+BE_LOCK_R       = 1.0   # Change 9: Move SL to BE once leg reaches this R in profit (was 0.5)
+BE_LOCK_BUFFER  = 30    # Extra points buffer above/below BE price (stops_level safe)
+
+# ─────────────────────────────────────────────
+#  LOGGING SETUP
+# ─────────────────────────────────────────────
+logger = logging.getLogger("brain")
+logger.setLevel(logging.INFO)
+
+_fh = logging.handlers.RotatingFileHandler(
+    BRAIN_LOG_FILE, maxBytes=2*1024*1024, backupCount=5, encoding="utf-8"
+)
+_fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+_ch = logging.StreamHandler()
+_ch.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+logger.addHandler(_fh)
+logger.addHandler(_ch)
+
+# ─────────────────────────────────────────────
+#  CONVICTION LOG (correlation data)
+# ─────────────────────────────────────────────
+CONV_LOG_HEADER = [
+    "timestamp", "conviction", "adx", "atr", "regime",
+    "open_positions",
+    # per-position columns (blank when action=IDLE)
+    "ticket", "magic", "side", "leg_type",
+    "price_open", "current_price", "profit_usd",
+    "sl", "tp", "r_multiple",
+    "brain_action", "exit_reason",
+]
+
+def _init_conviction_log():
+    """Write CSV header once on fresh start. Safe to call repeatedly."""
+    if not os.path.isfile(CONVICTION_LOG_FILE):
+        with open(CONVICTION_LOG_FILE, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(CONV_LOG_HEADER)
+
+def log_conviction(conviction, adx, atr, regime,
+                   pos=None, current_price=0.0,
+                   r_multiple=0.0, action="IDLE", exit_reason=""):
+    ts         = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    open_count = len(_api().positions_get(symbol=SYMBOL) or [])
+    leg_map    = {201: "SCALP", 202: "REVERSAL"}
+    side_map   = {0: "BUY", 1: "SELL"}
+
+    if pos:
+        row = [
+            ts, round(conviction, 2), round(adx, 2), round(atr, 5), regime,
+            open_count,
+            pos.ticket, pos.magic,
+            side_map.get(pos.type, "?"),
+            leg_map.get(pos.magic, "UNK"),
+            pos.price_open, round(current_price, 3),
+            round(pos.profit, 2),
+            pos.sl, pos.tp,
+            round(r_multiple, 4),
+            action, exit_reason,
+        ]
+    else:
+        # Blank positional columns when logging an IDLE/pulse snapshot
+        pos_blank_count = len(CONV_LOG_HEADER) - 6 - 2  # 6 lead cols, 2 tail cols
+        row = [
+            ts, round(conviction, 2), round(adx, 2), round(atr, 5), regime,
+            open_count,
+            *[""] * pos_blank_count,
+            action, exit_reason,
+        ]
+
+    with open(CONVICTION_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(row)
+
+# ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
+#  MARKET INTELLIGENCE (Layer 1 — The Pulse)
+# ─────────────────────────────────────────────
+# ── sw-regime: 3-signal percentile classifier ────────────────────────────────
+# Replaces simple ADX+momentum regime with the same percentile classifier
+# used by CAB v16.3. Scale-invariant, zero sklearn dependency.
+# Regime thresholds match master plan consensus spec.
+TREND_ADX_THRESH    = 65    # ADX rank above this → TRENDING signal
+EXHAUST_ATR_THRESH  = 75    # ATR-ratio rank above this → exhaustion
+EXHAUST_BODY_THRESH = 35    # Body/Range rank below this → weak body
+REGIME_BARS         = 170   # M1 bars fetched (150 usable + warmup)
+
+
+def get_market_state():
+    """
+    Returns (conviction, adx, atr, regime_label).
+    Consumes canonical Layer 0 facts from the Knowledge Register, solving
+    ATR timeframe mismatches and triplicated ADX calculations.
+    Retains M1 body momentum for fast scalping conviction.
+    """
+    from core.knowledge_register import KnowledgeRegister
+    kr = KnowledgeRegister()
+    
+    # Layer 0 Structural Facts (M15 context for M1 scalper)
+    snapshot = kr.get_market_state(SYMBOL, "M15")
+    
+    if snapshot is None:
+        return 50.0, 0.0, 0.0, "UNKNOWN"
+
+    adx_val = snapshot.adx_raw
+    atr_raw = snapshot.atr_raw
+    regime = snapshot.regime.value
+    
+    # M1 micro-structure for conviction score
+    rates = _api().copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M1, 0, 50)
+    if rates is None or len(rates) < 20:
+        momentum_score = 25.0  # neutral fallback
+    else:
+        df = pd.DataFrame(rates)
+        df["body"] = (df["close"] - df["open"]).abs()
+        avg_body = df["body"].mean()
+        current_body = float(df["body"].iloc[-1])
+        momentum_score = (current_body / (avg_body + 1e-9)) * 50
+        
+    conviction = float(min(adx_val * 1.0 + momentum_score * 0.5, 100))
+    return conviction, adx_val, atr_raw, regime
+
+# ─────────────────────────────────────────────
+#  ADAPTIVE CALIBRATION ENGINE (Layer 1.5)
+# ─────────────────────────────────────────────
+# Default hardcoded fallbacks — used on cold-start or file error
+ADAPTIVE_DEFAULTS = {
+    "tp_201_exit":    40.0,  # manage_201: fluid TP threshold (conviction)
+    "tp_202_exit":    35.0,  # manage_202: fluid TP threshold (conviction)
+    "rev_adx_block":  40.0,  # gate 202: block reversal if ADX above this
+    "tf_conv_fire":   65.0,  # gate 203: fire trend-follow if conviction above this
+    "reaper_mult":     1.8,  # reaper ATR multiplier (202/203)
+    "is_adaptive":       0,  # 0 = using defaults, 1 = calibrated
+}
+
+def compute_adaptive_thresholds():
+    """
+    Reads the last CALIBRATION_WINDOW_MINS of conviction log and derives
+    live thresholds from rolling percentiles.
+
+    Percentile logic:
+      P20 conviction → tp_201_exit  (exit scalp when conviction in bottom 20%)
+      P25 conviction → tp_202_exit  (exit reversal when conviction in bottom 25%)
+      P30 conviction → tp_203_exit  (exit trend when conviction in bottom 30%)
+      P70 ADX        → rev_adx_block (block reversal when ADX in top 30%)
+      P80 conviction → tf_conv_fire  (fire trend-follow only when in top 20%)
+      P75 ATR-derived→ reaper_mult   (dynamic reaper, bounded 1.5–2.2)
+
+    Cold-start: if fewer than CALIBRATION_MIN_ROWS available, writes
+    is_adaptive=0 and falls back to ADAPTIVE_DEFAULTS.
+    """
+    try:
+        if not os.path.isfile(CONVICTION_LOG_FILE):
+            return False
+
+        # Guard: if file exists but has wrong columns (e.g. stale from old run)
+        # delete it so _init_conviction_log() recreates with correct headers
+        try:
+            df = pd.read_csv(CONVICTION_LOG_FILE, usecols=["timestamp", "conviction", "adx", "atr"])
+        except ValueError:
+            os.remove(CONVICTION_LOG_FILE)
+            _init_conviction_log()
+            return False  # cold start — use defaults this cycle
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.dropna(subset=["timestamp", "conviction", "adx"])
+
+        cutoff = datetime.now() - pd.Timedelta(minutes=CALIBRATION_WINDOW_MINS)
+        recent = df[df["timestamp"] > cutoff].copy()
+
+        if len(recent) < CALIBRATION_MIN_ROWS:
+            # Cold-start — write defaults with is_adaptive=0
+            _write_adaptive(ADAPTIVE_DEFAULTS)
+            logger.debug(
+                f"CALIBRATION cold-start: only {len(recent)} rows "
+                f"(need {CALIBRATION_MIN_ROWS}), using hardcoded defaults"
+            )
+            return False
+
+        # ── Conviction percentiles ───────────────────────────────────
+        tp_201 = float(recent["conviction"].quantile(0.20))
+        tp_202 = float(recent["conviction"].quantile(0.25))
+        tf_fire = float(recent["conviction"].quantile(0.80))
+
+        # ── ADX percentile ──────────────────────────────────────────
+        rev_block = float(recent["adx"].quantile(0.70))
+
+        # ── Dynamic Reaper: P75 ATR-based, bounded 1.5–2.2 ──────────
+        # Higher recent ATR volatility → slightly wider reaper allowance
+        atr_p75 = float(recent["atr"].quantile(0.75)) if "atr" in recent.columns else 0
+        atr_p25 = float(recent["atr"].quantile(0.25)) if "atr" in recent.columns else 0
+        atr_range_ratio = (atr_p75 / (atr_p25 + 1e-9))
+        reaper = float(np.clip(1.5 + (atr_range_ratio - 1.0) * 0.3, 1.5, 2.2))
+
+        thresholds = {
+            "tp_201_exit":   round(tp_201,  2),
+            "tp_202_exit":   round(tp_202,  2),
+            "rev_adx_block": round(rev_block, 2),
+            "tf_conv_fire":  round(tf_fire,  2),
+            "reaper_mult":   round(reaper,   3),
+            "is_adaptive":   1,
+        }
+
+        _write_adaptive(thresholds)
+        logger.debug(
+            f"CALIBRATION updated | rows={len(recent)} | "
+            f"tp201={thresholds['tp_201_exit']} "
+            f"tp202={thresholds['tp_202_exit']} | "
+            f"rev_block={thresholds['rev_adx_block']} "
+            f"tf_fire={thresholds['tf_conv_fire']} "
+            f"reaper={thresholds['reaper_mult']}"
+        )
+        return True
+
+    except Exception as exc:
+        logger.error(f"CALIBRATION error: {exc}", exc_info=True)
+        return False
+
+
+def _write_adaptive(thresholds: dict):
+    """Write the adaptive threshold file for Hunter + managers to consume."""
+    with open(ADAPTIVE_THRESHOLD_FILE, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(list(thresholds.keys()))
+        w.writerow(list(thresholds.values()))
+
+
+def read_adaptive_thresholds():
+    """
+    Read the latest adaptive thresholds. Returns ADAPTIVE_DEFAULTS
+    on any failure so managers always have safe numbers.
+    """
+    try:
+        if not os.path.isfile(ADAPTIVE_THRESHOLD_FILE):
+            return ADAPTIVE_DEFAULTS.copy()
+        with open(ADAPTIVE_THRESHOLD_FILE, "r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        if not rows:
+            return ADAPTIVE_DEFAULTS.copy()
+        row = rows[0]
+        return {
+            "tp_201_exit":   float(row.get("tp_201_exit",   ADAPTIVE_DEFAULTS["tp_201_exit"])),
+            "tp_202_exit":   float(row.get("tp_202_exit",   ADAPTIVE_DEFAULTS["tp_202_exit"])),
+            "rev_adx_block": float(row.get("rev_adx_block", ADAPTIVE_DEFAULTS["rev_adx_block"])),
+            "tf_conv_fire":  float(row.get("tf_conv_fire",  ADAPTIVE_DEFAULTS["tf_conv_fire"])),
+            "reaper_mult":   float(row.get("reaper_mult",   ADAPTIVE_DEFAULTS["reaper_mult"])),
+            "is_adaptive":   int(row.get("is_adaptive",     0)),
+        }
+    except Exception:
+        return ADAPTIVE_DEFAULTS.copy()
+
+
+# ─────────────────────────────────────────────
+#  POSITION MANAGEMENT HELPERS (Layer 3)
+# ─────────────────────────────────────────────
+def _get_tick_price(pos):
+    """Returns current price relevant to this position. None on failure."""
+    tick = _api().symbol_info_tick(SYMBOL)
+    if not tick:
+        return None
+    return tick.bid if pos.type == 0 else tick.ask
+
+def _compute_initial_risk(pos, atr):
+    """Initial risk in price points. Falls back to 2×ATR if no SL set."""
+    if pos.sl != 0:
+        return abs(pos.price_open - pos.sl)
+    return atr * 2
+
+def _compute_individual_r(pos) -> float:
+    """
+    Per-leg signed R-multiple using the leg's own entry and SL.
+    Used by the individual leg TP system — independent of GridState.first_layer_risk.
+    Returns 0.0 if SL is missing (no-SL fill — STOPS_LEVEL guard should prevent this).
+    """
+    if pos.sl == 0:
+        return 0.0
+    own_risk = abs(pos.price_open - pos.sl)
+    if own_risk <= 0:
+        return 0.0
+    cp = _get_tick_price(pos)
+    if cp is None:
+        return 0.0
+    is_buy = (pos.type == 0)
+    move = (cp - pos.price_open) if is_buy else (pos.price_open - cp)
+    return move / own_risk
+
+def _set_leg_tp(pos) -> bool:
+    """
+    Set broker-side TP using per-magic multiplier from LEG_TP_BY_MAGIC.
+    201=1.0R, 202=1.5R, 204=2.0R — matches each leg's reversion philosophy.
+
+    Called once per leg at first registration. Broker closes automatically
+    when price reaches TP — no Python loop needed at the moment of close.
+
+    If TP already set (non-zero) → skip.
+    If SL is zero (no-SL fill, rare) → skip.
+    STOPS_LEVEL guard applied automatically.
+    """
+    if not LEG_TP_ENABLED:
+        return False
+    if pos.sl == 0:
+        if pos.ticket not in _no_sl_warned:
+            logger.warning(f"LEG_TP: ticket={pos.ticket} has no SL - cannot set TP")
+            _no_sl_warned.add(pos.ticket)
+        return False
+
+    own_risk = abs(pos.price_open - pos.sl)
+    if own_risk <= 0:
+        return False
+
+    # Per-magic TP multiplier — the core RR fix
+    tp_r    = LEG_TP_BY_MAGIC.get(pos.magic, LEG_TP_DEFAULT)
+    is_buy  = (pos.type == 0)
+    tp_dist = own_risk * tp_r
+    raw_tp  = (pos.price_open + tp_dist) if is_buy else (pos.price_open - tp_dist)
+
+    # STOPS_LEVEL guard
+    sym_info  = _api().symbol_info(pos.symbol)
+    tick      = _api().symbol_info_tick(pos.symbol)
+    if sym_info is None or tick is None:
+        return False
+
+    stops_dist = sym_info.trade_stops_level * sym_info.point
+    if stops_dist == 0:
+        stops_dist = tick.ask - tick.bid + (20 * sym_info.point)  # dynamic fallback
+    curr_price = tick.bid if is_buy else tick.ask
+
+    if is_buy:
+        if raw_tp < curr_price + stops_dist:
+            raw_tp = curr_price + stops_dist + own_risk
+            logger.debug(
+                f"LEG_TP: ticket={pos.ticket} TP widened past stops_level -> {raw_tp:.3f}"
+            )
+    else:
+        if raw_tp > curr_price - stops_dist:
+            raw_tp = curr_price - stops_dist - own_risk
+            logger.debug(
+                f"LEG_TP: ticket={pos.ticket} TP widened past stops_level -> {raw_tp:.3f}"
+            )
+
+    # Ensure both TP and SL are rounded exactly to broker digits to prevent 10011
+    tp = round(raw_tp, sym_info.digits)
+    sl = round(pos.sl, sym_info.digits)
+    
+    if pos.tp == tp:
+        return False
+        
+    # Check if existing SL is blocking modification (10016)
+    if sl != 0 and abs(sl - curr_price) < stops_dist:
+        logger.debug(f"LEG_TP DEFERRED: ticket={pos.ticket} SL ({sl}) is inside stops_level ({stops_dist})")
+        return False
+
+    req = {
+        "action":   mt5.TRADE_ACTION_SLTP,
+        "symbol":   pos.symbol,
+        "position": pos.ticket,
+        "sl":       sl,
+        "tp":       tp,
+    }
+    result = _api().order_send(req)
+    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        logger.info(
+            f"LEG_TP SET | ticket={pos.ticket} | "
+            f"entry={pos.price_open:.3f} | sl={sl:.3f} | "
+            f"tp={tp:.3f} | own_risk={own_risk:.3f} | "
+            f"tp_r={tp_r}R (magic={pos.magic}) | {'BUY' if is_buy else 'SELL'}"
+        )
+        return True
+    else:
+        code = result.retcode if result else "None"
+        broker_msg = result.comment if result else "No response"
+        logger.warning(
+            f"LEG_TP SET FAILED | ticket={pos.ticket} | retcode={code} | msg={broker_msg} | sl={sl} tp={tp}"
+        )
+        return False
+
+# Tracks tickets that have already had BE-lock applied this trade lifecycle.
+# Prevents repeatedly modifying SL once BE is set (saves redundant MT5 calls).
+_be_locked_tickets: set = set()
+_no_sl_warned: set = set()
+
+
+def _check_be_lock(pos) -> bool:
+    """
+    BE-Lock Ratchet — move SL to breakeven once leg reaches BE_LOCK_R (+0.5R).
+
+    Called every manage cycle for 201, 202, 204 legs. Fires once per trade
+    (tracked in _be_locked_tickets). After BE-lock, the worst outcome for
+    this leg becomes a scratch (0R) instead of a full -1.0R loss.
+
+    Effect on expectancy (at 65% milestone rate):
+      Old: ~35% of legs lose -1.0R  →  avg loss = -0.35R per leg
+      New: ~35% scratch at 0R       →  avg loss =  0.00R per leg
+      Net improvement: +0.35R per leg that would have been a full loss.
+
+    STOPS_LEVEL guard: BE price + buffer must clear broker minimum distance.
+    Only tightens SL — never moves it against the position.
+    Returns True if BE-lock was applied this cycle.
+    """
+    if pos.ticket in _be_locked_tickets:
+        return False   # already locked — skip
+    if pos.sl == 0:
+        return False   # no SL to lock to
+
+    own_risk = abs(pos.price_open - pos.sl)
+    if own_risk <= 0:
+        return False
+
+    # Compute current leg R using individual risk (same as _compute_individual_r)
+    sym_info = _api().symbol_info(pos.symbol)
+    tick     = _api().symbol_info_tick(pos.symbol)
+    if sym_info is None or tick is None:
+        return False
+
+    is_buy     = (pos.type == 0)
+    curr_price = tick.bid if is_buy else tick.ask
+    price_move = (curr_price - pos.price_open) if is_buy else (pos.price_open - curr_price)
+    leg_r      = price_move / own_risk
+
+    if leg_r < BE_LOCK_R:
+        return False   # not at milestone yet
+
+    # Compute BE price with buffer (stops_level safe)
+    buf        = sym_info.point * BE_LOCK_BUFFER
+    stops_dist = sym_info.trade_stops_level * sym_info.point
+    min_dist   = max(buf, stops_dist + sym_info.point * 5)
+
+    if is_buy:
+        be_sl = pos.price_open + min_dist
+        # Only tighten — don't move SL backwards if already better
+        if pos.sl >= be_sl:
+            _be_locked_tickets.add(pos.ticket)   # already beyond BE, mark done
+            return False
+    else:
+        be_sl = pos.price_open - min_dist
+        if pos.sl != 0 and pos.sl <= be_sl:
+            _be_locked_tickets.add(pos.ticket)
+            return False
+
+    be_sl = round(be_sl, sym_info.digits)
+    if be_sl == round(pos.sl, sym_info.digits):
+        _be_locked_tickets.add(pos.ticket)
+        return False
+
+    req = {
+        "action":   mt5.TRADE_ACTION_SLTP,
+        "symbol":   pos.symbol,
+        "position": pos.ticket,
+        "sl":       be_sl,
+        "tp":       pos.tp,   # preserve existing TP (the per-magic TP anchor)
+    }
+    result = _api().order_send(req)
+    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        _be_locked_tickets.add(pos.ticket)
+        logger.info(
+            f"BE_LOCK | ticket={pos.ticket} magic={pos.magic} | "
+            f"R={leg_r:+.2f} >= {BE_LOCK_R} | "
+            f"sl: {pos.sl:.3f} → {be_sl:.3f} (BE+{BE_LOCK_BUFFER}pts) | "
+            f"{'BUY' if is_buy else 'SELL'}"
+        )
+        return True
+    else:
+        code = result.retcode if result else "None"
+        if code == 10036:
+            logger.debug(f"BE_LOCK ignored | ticket={pos.ticket} closed concurrently.")
+        else:
+            logger.warning(
+                f"BE_LOCK FAILED | ticket={pos.ticket} | retcode={code}"
+            )
+        return False
+
+
+def _send_modify(pos, new_sl):
+    """
+    Modify SL on an open position. Preserves existing TP value.
+    Guard (sw-stoplvl): check STOPS_LEVEL before sending to prevent
+    silent broker rejection — port from CAB v16.3.
+    """
+    sym_info = _api().symbol_info(pos.symbol)
+    tick     = _api().symbol_info_tick(pos.symbol)
+    if sym_info and tick:
+        stops_dist = sym_info.trade_stops_level * sym_info.point
+        curr_price = tick.bid if pos.type == 0 else tick.ask
+        if abs(new_sl - curr_price) < stops_dist:
+            # Widen by 30 points and retry once
+            buf    = sym_info.point * 30
+            new_sl = (curr_price - stops_dist - buf if pos.type == 0
+                      else curr_price + stops_dist + buf)
+            logger.debug(
+                f"modify_sl: SL inside stops_level for #{pos.ticket} "
+                f"— widened to {new_sl:.5f}"
+            )
+    rounded_new_sl = round(new_sl, 3)
+    if rounded_new_sl == round(pos.sl, 3):
+        return None
+
+    req = {
+        "action":   mt5.TRADE_ACTION_SLTP,
+        "symbol":   pos.symbol,
+        "position": pos.ticket,
+        "sl":       rounded_new_sl,
+        "tp":       pos.tp,   # preserve current TP (0.0 for Fluid legs)
+    }
+    result = _api().order_send(req)
+    if result and result.retcode != mt5.TRADE_RETCODE_DONE:
+        logger.warning(
+            f"modify_sl FAILED ticket={pos.ticket} "
+            f"retcode={result.retcode}"
+        )
+    return result
+
+
+def _spread_allows_close(pos, tick, sym_info) -> tuple:
+    """
+    Context-aware spread guard. Returns (allow: bool, reason: str).
+
+    Logic:
+      > 500pts : Always defer — genuinely broken market (rollover, weekend gap)
+      > 100pts : Cost-aware decision:
+          - Profit covers spread cost → close (lock in gains)
+          - Loss already > 2× spread cost → close (reaper, loss dominates)
+          - Near breakeven → defer (spread would punish the outcome)
+      <= 100pts: Always allow — normal market conditions
+    """
+    if sym_info is None or sym_info.point <= 0:
+        return True, "no_sym_info"
+
+    spread_pts = (tick.ask - tick.bid) / sym_info.point
+
+    # Broken market — never trade into this
+    if spread_pts > 500:
+        return False, f"spread {spread_pts:.0f}pts > 500pt emergency limit"
+
+    # Normal — always allow
+    if spread_pts <= 100:
+        return True, "normal_spread"
+
+    # Wide spread (100–500pts) — cost-aware decision
+    # Estimate spread cost in account currency
+    try:
+        spread_price  = tick.ask - tick.bid
+        sl_ticks      = spread_price / sym_info.trade_tick_size
+        spread_cost   = sl_ticks * sym_info.trade_tick_value * pos.volume
+    except Exception:
+        spread_cost   = 0.0
+
+    profit = pos.profit
+
+    # In profit and profit covers the spread cost → close
+    if profit > 0 and profit >= spread_cost:
+        return True, f"profit {profit:.2f} covers spread cost {spread_cost:.2f}"
+
+    # In loss and loss already dwarfs spread cost → close (reaper case)
+    # 2× threshold: spread cost is a rounding error vs the actual loss
+    if profit < 0 and abs(profit) >= spread_cost * 2:
+        return True, f"loss {profit:.2f} dominates spread cost {spread_cost:.2f}"
+
+    # Near breakeven or small profit where spread dominates → defer
+    return False, (
+        f"spread {spread_pts:.0f}pts | "
+        f"profit {profit:.2f} | "
+        f"spread_cost {spread_cost:.2f} — deferring"
+    )
+
+# P0 fix: close-retry circuit breaker (module-level)
+_ghost_close_suppressed = {}
+
+def _close_market(pos, exit_reason):
+    """
+    Market-close a position.
+    Guards (sw-spread + sw-stoplvl):
+      1. Position-exists check  — broker may have already closed via SL/TP
+         (retcode=10036 observed in smoke test — position gone before we act)
+      2. Spread guard           — skip if spread > 50 ticks (low liquidity)
+      3. Close-retry suppression — prevents 10018 infinite loop
+    """
+    # Guard 1: confirm position still exists before sending close order
+    existing = _api().positions_get(symbol=pos.symbol)
+    if not existing or not any(p.ticket == pos.ticket for p in existing):
+        logger.debug(
+            f"close_market: ticket={pos.ticket} already closed — skipping"
+        )
+        return None
+
+    tick = _api().symbol_info_tick(SYMBOL)
+    if not tick:
+        logger.warning(
+            f"close_position: tick=None for ticket={pos.ticket}, deferring."
+        )
+        return None
+
+    # Guard 2: cost-aware spread guard
+    sym_info = _api().symbol_info(pos.symbol)
+    allow, reason = _spread_allows_close(pos, tick, sym_info)
+    if not allow:
+        logger.warning(
+            f"close BLOCKED ticket={pos.ticket} | {reason}"
+        )
+        return None
+    elif sym_info and (tick.ask - tick.bid) / max(sym_info.point, 1e-10) > 100:
+        logger.info(
+            f"close ALLOWED despite wide spread | ticket={pos.ticket} | {reason}"
+        )
+
+    # Guard 3: P0 fix — close-retry circuit breaker
+    suppressed = _ghost_close_suppressed.get(pos.ticket)
+    if suppressed:
+        fail_count, suppress_until = suppressed
+        if time.time() < suppress_until:
+            return None  # silently skip
+        else:
+            del _ghost_close_suppressed[pos.ticket]
+
+    t_type = (mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY
+               else mt5.ORDER_TYPE_BUY)
+    price  = tick.bid if t_type == mt5.ORDER_TYPE_SELL else tick.ask
+    req = {
+        "action":       mt5.TRADE_ACTION_DEAL,
+        "symbol":       pos.symbol,
+        "volume":       pos.volume,
+        "type":         t_type,
+        "position":     pos.ticket,
+        "price":        price,
+        "magic":        pos.magic,
+        "comment":      f"BRAIN_{exit_reason}"[:28],
+        "type_filling": mt5.ORDER_FILLING_IOC,
+    }
+    result = _api().order_send(req)
+    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        # ── Unified Trade Ledger: GHOST EXIT ─────────────────────────────
+        if write_trade_event:
+            is_buy = (pos.type == 0)
+            risk_dist = abs(pos.price_open - pos.sl)
+            r_mult = None
+            if risk_dist > 1e-10:
+                pm = (price - pos.price_open) if is_buy else (pos.price_open - price)
+                r_mult = round(pm / risk_dist, 3)
+            # We don't have exact entry regime stored on the position itself, but we'll try to calculate R
+            write_trade_event(
+                bot="GHOST", event="EXIT", ticket=pos.ticket,
+                symbol=pos.symbol,
+                direction="BUY" if is_buy else "SELL",
+                price=price,
+                sl=pos.sl, tp=pos.tp, volume=pos.volume,
+                r_multiple=r_mult,
+                exit_reason=exit_reason,
+                pnl_usd=pos.profit,
+                magic=pos.magic,
+            )
+        
+        from core.knowledge_register import KnowledgeRegister
+        KnowledgeRegister().unregister_trade_thesis(pos.ticket)
+        
+        # MAE/MFE Trade Excursion Logging
+        try:
+            from core.trade_analytics import TradeAnalyticsEngine
+            TradeAnalyticsEngine().log_trade_excursion(pos, "GHOST")
+        except Exception as e:
+            logger.error(f"Failed to log trade excursion: {e}")
+    elif result and result.retcode != mt5.TRADE_RETCODE_DONE:
+        # P0 fix: track failures and suppress on 10018 or after 5 retries
+        prev = _ghost_close_suppressed.get(pos.ticket, (0, 0.0))
+        new_count = prev[0] + 1
+        suppress_seconds = 300
+
+        if result.retcode == 10018:
+            _ghost_close_suppressed[pos.ticket] = (new_count, time.time() + suppress_seconds)
+            logger.warning(
+                f"close SUPPRESSED ticket={pos.ticket} | Market closed (10018) | "
+                f"will retry in {suppress_seconds}s"
+            )
+        elif new_count >= 5:
+            _ghost_close_suppressed[pos.ticket] = (new_count, time.time() + suppress_seconds)
+            logger.warning(
+                f"close SUPPRESSED ticket={pos.ticket} | {new_count} failures | "
+                f"last retcode={result.retcode} | will retry in {suppress_seconds}s"
+            )
+        else:
+            _ghost_close_suppressed[pos.ticket] = (new_count, 0.0)
+            logger.warning(
+                f"close FAILED ticket={pos.ticket} retcode={result.retcode} | "
+                f"attempt {new_count}/5"
+            )
+    return result
+
+# ─────────────────────────────────────────────
+#  POSITION MANAGERS — one per magic personality
+# ─────────────────────────────────────────────
+def manage_201_scalp(pos, conviction, adx, atr, regime):
+    """
+    Magic 201 — SCALP leg of the ghost grid.
+    Change 2 (grid_sniper.md): each 201 leg lives or dies purely on its own
+    SL / personality TP (1.0R) / BE-lock. No combined-R exit logic.
+    GridState used only for position-count capping (MAX_LEGS=4).
+    """
+    gs = get_grid_state(201)
+    is_new = pos.ticket not in gs.legs and pos.ticket not in gs._cap_refused
+    if is_new:
+        gs.add_leg(pos.ticket, pos.price_open, pos.sl)
+
+    # fix-legtp: TP set unconditionally — idempotent, safe on every cycle.
+    _set_leg_tp(pos)
+
+    # HIGH-5: BE-lock disabled for Leg 201 (scalp targets 1.0R, BE lock conflicts)
+    # _check_be_lock(pos)
+
+    leg_r = _compute_individual_r(pos)
+    be_status = "BE_LOCKED" if pos.ticket in _be_locked_tickets else "running"
+    logger.debug(
+        f"LEG_201 ticket={pos.ticket} | "
+        f"individual_R={leg_r:+.2f} | {be_status} | "
+        f"tp={'set' if pos.tp != 0 else 'MISSING'}"
+    )
+    return "LEG_MANAGED"
+
+
+def manage_202_reversal(pos, conviction, adx, atr, regime):
+    """
+    Magic 202 — REVERSAL leg of the ghost grid.
+    Change 2 (grid_sniper.md): each 202 leg lives or dies purely on its own
+    SL / personality TP (1.5R) / BE-lock. No combined-R exit logic.
+    GridState used only for position-count capping (MAX_LEGS=4).
+    """
+    gs = get_grid_state(202)
+    is_new = pos.ticket not in gs.legs and pos.ticket not in gs._cap_refused
+    if is_new:
+        gs.add_leg(pos.ticket, pos.price_open, pos.sl)
+
+    # fix-legtp: TP set unconditionally — idempotent, safe on every cycle.
+    _set_leg_tp(pos)
+
+    # BE-lock ratchet
+    _check_be_lock(pos)
+
+    leg_r = _compute_individual_r(pos)
+    be_status = "BE_LOCKED" if pos.ticket in _be_locked_tickets else "running"
+    logger.debug(
+        f"LEG_202 ticket={pos.ticket} | "
+        f"individual_R={leg_r:+.2f} | {be_status} | "
+        f"tp={'set' if pos.tp != 0 else 'MISSING'}"
+    )
+    return "LEG_MANAGED"
+
+
+
+
+
+# ==============================================================================
+#  GRID STATE  (gh-gs)
+#  Pure Python, zero MT5 dependency.
+#  One instance PER MAGIC (201, 202, 204). Each magic's legs are tracked
+#  independently — no cross-magic leg ever enters another magic's instance.
+#  Change 1 (grid_sniper.md): split from single shared global.
+# ==============================================================================
+
+class GridState:
+    """
+    Per-magic grid state tracker.
+
+    Change 1 (grid_sniper.md): each magic (201, 202, 204) gets its own
+    independent instance. No cross-magic contamination.
+
+    For 204 (Ghost Cache): tracks combined P&L for grid-level exits
+    (Grid TP/Stop/Protector). first_layer_risk is the R denominator.
+
+    For 201/202: used only for position-count capping (MAX_LEGS).
+    Combined-R exit logic will be removed from 201/202 in Change 2.
+    """
+
+    def __init__(self):
+        self.legs:             list  = []    # list of open position tickets
+        self.first_layer_risk: float = 0.0   # |entry_price - sl| of first leg
+        self.active:           bool  = False
+        self._cap_refused:     set   = set() # tickets refused due to MAX_LEGS cap
+                                             # prevents repeated add_leg() calls on
+                                             # every 2s cycle for the same ticket
+        self.created_at:       float = 0.0   # fix-gridstale: set when grid activates.
+                                             # Used to force-close a grid that has sat
+                                             # open too long without hitting TP/stop —
+                                             # see MAX_GRID_AGE_SECONDS in manage_grid_logic().
+                                             # Root cause this addresses: a single leg
+                                             # that never reaches its TP (and, pre fix-legtp,
+                                             # never even had one) keeps `legs` non-empty
+                                             # forever, which blocks reset() from ever firing,
+                                             # which meant every later probe's legs piled into
+                                             # _cap_refused indefinitely — confirmed in the logs:
+                                             # zero "GridState reset" lines across 5 weeks.
+
+    MAX_LEGS = 4   # Hard cap — master plan risk rule 8.2. Never raise during demo.
+
+    def add_leg(self, ticket: int, entry_price: float, sl: float):
+        """Register a new leg when it fills. Refuses beyond MAX_LEGS.
+        # fix-gridstale (Tier 0 #2): skip legs that have no SL
+        # prevents the add_leg call on subsequent cycles - eliminates log spam.
+        """
+        if sl <= 0.0:
+            if ticket not in _no_sl_warned:
+                logger.warning(f"GRID: ticket={ticket} has no SL - deferring add_leg")
+                _no_sl_warned.add(ticket)
+            return
+
+        if len(self.legs) >= self.MAX_LEGS:
+            if ticket not in self._cap_refused:
+                # Log ONCE per ticket, not every 2 seconds
+                logger.info(
+                    f"GRID: depth cap reached ({self.MAX_LEGS} legs) — "
+                    f"ticket={ticket} overflow. Tracking without adding."
+                )
+                self._cap_refused.add(ticket)
+            return
+        if not self.active:
+            # First leg — set risk anchor
+            self.first_layer_risk = abs(entry_price - sl)
+            self.active = True
+            self.created_at = time.time()   # fix-gridstale
+        self.legs.append(ticket)
+        logger.info(
+            f"GRID: leg added ticket={ticket} | "
+            f"total_legs={len(self.legs)}/{self.MAX_LEGS} | "
+            f"first_layer_risk={round(self.first_layer_risk, 5)}"
+        )
+
+    def remove_leg(self, ticket: int):
+        """Remove a leg that closed (SL hit by broker, etc.)."""
+        if ticket in self.legs:
+            self.legs.remove(ticket)
+        if not self.legs:
+            self.active = False
+
+    def combined_pnl(self, positions) -> float:
+        """Sum of profit across all active grid legs."""
+        ticket_set = set(self.legs)
+        return sum(p.profit for p in positions if p.ticket in ticket_set)
+
+    def r_multiple(self, positions) -> float:
+        """Combined P&L expressed as R-multiple of first layer risk."""
+        if self.first_layer_risk <= 0:
+            return 0.0
+        return self.combined_pnl(positions) / self.first_layer_risk
+
+    def open_legs(self, positions) -> list:
+        """Return position objects for all legs still open."""
+        ticket_set = set(self.legs)
+        return [p for p in positions if p.ticket in ticket_set]
+
+    def reset(self):
+        # Clean up BE-lock tracking for all legs in this grid
+        for ticket in self.legs:
+            _be_locked_tickets.discard(ticket)
+            _no_sl_warned.discard(ticket)
+        self.legs             = []
+        self.first_layer_risk = 0.0
+        self.active           = False
+        self._cap_refused     = set()   # clear overflow tracking for next probe
+        self.created_at       = 0.0     # fix-gridstale
+        logger.info("GRID: GridState reset")
+
+    def status(self, positions) -> str:
+        r = self.r_multiple(positions)
+        pnl = self.combined_pnl(positions)
+        return (
+            f"legs={len(self.legs)} "
+            f"R={r:+.2f} "
+            f"P&L={pnl:.2f} "
+            f"risk={round(self.first_layer_risk, 5)}"
+        )
+
+
+# Per-magic grid state — one instance per magic, fully isolated.
+# Change 1 (grid_sniper.md): replaces single shared _grid_state.
+_grid_state_201 = GridState()
+_grid_state_202 = GridState()
+_grid_state_204 = GridState()
+
+# Lookup table for fire/reset logic that needs to address by magic
+_GRID_STATES = {
+    201: _grid_state_201,
+    202: _grid_state_202,
+    204: _grid_state_204,
+}
+
+
+def get_grid_state(magic: int = None) -> GridState:
+    """Access per-magic grid state.
+
+    With magic arg: returns the specific magic's GridState.
+    Without magic (legacy compat): returns 204 state (the only one
+    that will use combined-R exits after Change 2 is applied).
+    """
+    if magic is not None:
+        return _GRID_STATES.get(magic, _grid_state_204)
+    return _grid_state_204  # backward compat for manage_grid_logic()
+
+
+
+# ==============================================================================
+#  GRID WATCHER  (gh-gw + gh-gtp + gh-gstop)
+# ==============================================================================
+
+GRID_TP_R    = 1.0
+GRID_STOP_R  = -3.0
+GRID_PROT_R  = 0.35   # Lowered from 0.5 — closes the "0.49R no-protection" gap
+
+# fix-gridstale (Tier 0 #1): safety valve so a single leg that never reaches
+# its TP can't block GridState.reset() forever — this is what let the tracker
+# sit "full" for weeks with every subsequent probe silently landing in
+# _cap_refused. Individual legs already have their own TP (fix-legtp), so this
+# is a last-resort timeout, not the primary exit path. 72h is deliberately
+# generous — this should almost never fire once fix-legtp is live; if it fires
+# often, that's itself a signal worth watching in the logs.
+MAX_GRID_AGE_SECONDS = 72 * 3600
+
+
+def manage_grid_logic(positions, conviction, adx, atr, regime):
+    """
+    Grid-level exit manager — 204 (Ghost Cache) legs ONLY.
+    Changes 3/5 (grid_sniper.md): 201/202 no longer pass through this function.
+    Positions are filtered to magic 204 before computing combined R.
+
+    Grid TP     : combined 204-only R >= +1.0 → close all open 204 legs, reset
+    Grid Stop   : combined 204-only R <= -3.0 → close all open 204 legs, reset
+    Grid Protector : combined 204-only R >= +0.35R → BE-lock oldest 204 leg
+    Staleness timeout (Change 7): MAX_GRID_AGE scoped to 204 naturally.
+    """
+    # Change 5: filter positions to magic 204 only
+    positions_204 = [p for p in positions if p.magic == 204]
+    gs = get_grid_state(204)
+    if not gs.active:
+        return False
+
+    # Housekeeping: remove legs broker already closed (SL/TP hit)
+    # Change 5: uses positions_204 — only 204 tickets matter here
+    open_tickets_204 = {p.ticket for p in positions_204}
+    for ticket in list(gs.legs):
+        if ticket not in open_tickets_204:
+            logger.info(
+                f"GRID 204: leg {ticket} closed externally "
+                f"(SL/TP hit) — removing from _grid_state_204"
+            )
+            gs.remove_leg(ticket)
+
+    if not gs.active:
+        return False
+
+    # fix-gridstale: force-close and reset if this grid has been open too
+    # long without hitting TP/stop. Without this, a single non-closing leg
+    # keeps gs.legs non-empty indefinitely, reset() never fires, and every
+    # probe after it gets silently dropped into _cap_refused with no TP.
+    if gs.created_at and (time.time() - gs.created_at) > MAX_GRID_AGE_SECONDS:
+        grid_legs = gs.open_legs(positions_204)
+        age_hrs = (time.time() - gs.created_at) / 3600
+        logger.warning(
+            f"GRID 204 STALE_TIMEOUT | age={age_hrs:.1f}h > "
+            f"{MAX_GRID_AGE_SECONDS/3600:.0f}h limit | "
+            f"closing {len(grid_legs)} remaining 204 legs | {gs.status(positions_204)}"
+        )
+        for leg in grid_legs:
+            _close_market(leg, "GRID_STALE_TIMEOUT")
+        gs.reset()
+        return True
+
+    grid_legs = gs.open_legs(positions_204)
+    if not grid_legs:
+        gs.reset()
+        return False
+
+    r   = gs.r_multiple(positions_204)
+    pnl = gs.combined_pnl(positions_204)
+
+    # Change 6: log lines now explicitly reference 204 only
+    leg_r_summary = " | ".join(
+        f"#{leg.ticket}→{_compute_individual_r(leg):+.2f}R"
+        for leg in grid_legs
+    )
+    logger.info(
+        f"GRID 204 STATUS | {gs.status(positions_204)} | "
+        f"regime={regime} | conviction={round(conviction,1)} | "
+        f"legs: {leg_r_summary}"
+    )
+
+    # Grid TP — close all remaining 204 legs when combined reaches +1.0R
+    if r >= GRID_TP_R:
+        logger.warning(
+            f"GRID 204 TP | R={r:+.2f} >= {GRID_TP_R} | "
+            f"P&L={pnl:.2f} | closing {len(grid_legs)} remaining 204 legs"
+        )
+        for leg in grid_legs:
+            _close_market(leg, f"GRID_TP|R{r:+.2f}")
+        gs.reset()
+        return True
+
+    # Grid Stop — close all 204 legs immediately
+    if r <= GRID_STOP_R:
+        logger.warning(
+            f"GRID 204 STOP | R={r:+.2f} <= {GRID_STOP_R} | "
+            f"P&L={pnl:.2f} | closing {len(grid_legs)} 204 legs"
+        )
+        for leg in grid_legs:
+            _close_market(leg, f"GRID_STOP|R{r:+.2f}")
+        gs.reset()
+        return True
+
+    # Grid Protector — BE on oldest 204 leg at GRID_PROT_R (+0.35R)
+    # Fires once: only tightens SL, never loosens it
+    if r >= GRID_PROT_R:
+        oldest  = grid_legs[0]
+        is_buy  = (oldest.type == 0)
+        sym_info = _api().symbol_info(oldest.symbol)
+        tick     = _api().symbol_info_tick(oldest.symbol)
+        if sym_info and tick:
+            buf    = sym_info.point * 30
+            new_sl = (oldest.price_open + buf if is_buy
+                      else oldest.price_open - buf)
+            needs_update = (
+                (is_buy  and new_sl > oldest.sl) or
+                (not is_buy and (new_sl < oldest.sl or oldest.sl == 0))
+            )
+            if needs_update:
+                _send_modify(oldest, new_sl)
+                logger.info(
+                    f"GRID 204 PROTECTOR | ticket={oldest.ticket} | "
+                    f"R={r:+.2f} >= {GRID_PROT_R} | SL → BE+buffer"
+                )
+    return False
+
+
+
+def manage_204_ghost_cache(pos, conviction, adx, atr, regime):
+    """
+    Magic 204 — Ghost Cache exhaustion entry personality.
+    TP set at 2.0R on first registration (highest conviction, rarest fire).
+    BE-lock ratchet fires at +0.5R milestone every cycle.
+    Grid-state aware exits own all other exits — no per-position reaper.
+
+    204 fires later than 201/202 (nth virtual layer vs first retraction)
+    so it needs the most room to find reversion — 2.0R TP reflects this.
+    """
+    gs = get_grid_state(204)
+    is_new = pos.ticket not in gs.legs and pos.ticket not in gs._cap_refused
+    if is_new:
+        gs.add_leg(pos.ticket, pos.price_open, pos.sl)
+
+    # fix-legtp (Tier 0 #1): see manage_201_scalp for full rationale — TP is
+    # now set on every leg regardless of grid-cap state.
+    _set_leg_tp(pos)
+
+    # BE-lock ratchet — move SL to BE once leg reaches +0.5R
+    _check_be_lock(pos)
+
+    leg_r = _compute_individual_r(pos)
+    be_status = "BE_LOCKED" if pos.ticket in _be_locked_tickets else "running"
+    logger.debug(
+        f"LEG_204 ticket={pos.ticket} | "
+        f"individual_R={leg_r:+.2f} | {be_status} | "
+        f"tp={'set' if pos.tp != 0 else 'MISSING'}"
+    )
+    return "GRID_MANAGED"
+
+
+# Clean dispatch table — one manager per magic
+MAGIC_MANAGERS = {
+    201: manage_201_scalp,
+    202: manage_202_reversal,
+    204: manage_204_ghost_cache,   # gc-hunter: grid-managed, same as 201/202
+}
+
+# ─────────────────────────────────────────────
+#  MAIN BRAIN LOOP
+# ─────────────────────────────────────────────
+def run_brain():
+    if not mt5.initialize(path=TERMINAL_PATH):
+        logger.error("MT5 init failed — check TERMINAL_PATH.")
+        return
+
+    _init_conviction_log()
+    logger.info(
+        "BRAIN v3.1 ONLINE | Pulse=2s | Fluid TP Engaged | "
+        "201=SCALP-BE+REAPER | 202=REVERSAL-REAPER+TRAIL | "
+        f"log={BRAIN_LOG_FILE}"
+    )
+
+    heartbeat_time     = 0
+    conv_log_idle_time = 0
+
+    while True:
+        try:
+            conviction, adx, atr, regime = get_market_state()
+
+            # ── Heartbeat (2s pulse) ────────────────────────────────────
+            if time.time() - heartbeat_time > HEARTBEAT_INTERVAL:
+                logger.debug(
+                    f"HB | conviction={round(conviction,1)} "
+                    f"adx={round(adx,2)} regime={regime}"
+                )
+                # Removed write_brain_state: ghost_sniper now pulls via function call
+                compute_adaptive_thresholds()   # recalibrate every heartbeat
+                heartbeat_time = time.time()
+
+            # ── Idle conviction snapshot (30s cadence) ──────────────────
+            if time.time() - conv_log_idle_time > CONV_LOG_INTERVAL:
+                log_conviction(conviction, adx, atr, regime, action="IDLE")
+                conv_log_idle_time = time.time()
+
+            # ── Position management ─────────────────────────────────────
+            positions = _api().positions_get(symbol=SYMBOL)
+            if positions:
+                # MEDIUM-1: Cleanup closed legs from 201/202 GridStates
+                for m in (201, 202):
+                    open_t = {p.ticket for p in positions if p.magic == m}
+                    gs_m = get_grid_state(m)
+                    for t in list(gs_m.legs):
+                        if t not in open_t:
+                            gs_m.remove_leg(t)
+
+                # Grid-level exits — 204 only (Changes 2-5: 201/202 removed from grid logic)
+                manage_grid_logic(positions, conviction, adx, atr, regime)
+                # Per-position dispatch (203 ATR trail + leg registration)
+                for pos in positions:
+                    if pos.sl == 0.0 and time.time() - pos.time > 15:
+                        logger.critical(f"NAKED TRADE DETECTED: ticket={pos.ticket} >15s without SL. Force closing.")
+                        _close_market(pos, "FAILSAFE_NAKED")
+                        continue
+                    
+                    manager = MAGIC_MANAGERS.get(pos.magic)
+                    if manager:
+                        manager(pos, conviction, adx, atr, regime)
+
+        except Exception as exc:
+            # Never let the brain die silently
+            logger.error(
+                f"LOOP_EXCEPTION {type(exc).__name__}: {exc}",
+                exc_info=True
+            )
+            time.sleep(5)
+            # Attempt reconnect if terminal dropped
+            if not _api().terminal_info():
+                logger.warning("MT5 disconnected — attempting re-init...")
+                mt5.initialize(path=TERMINAL_PATH)
+
+        time.sleep(0.1)
+
+
+if __name__ == "__main__":
+    run_brain()

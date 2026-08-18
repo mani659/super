@@ -1,0 +1,24 @@
+Parsed 148 closed trades.
+
+=== CAB_INV_V2 ===
+Total Trades: 148, Win Rate: 31.8%, PnL: $-211.08
+
+Win Rate by Hour of Entry:
+             Count  Win_Rate     PnL
+hour_of_day                         
+0                1  0.000000  -17.66
+7               34  0.264706 -120.94
+8               29  0.344828  -50.09
+12              27  0.333333 -130.79
+16              31  0.483871  125.20
+20              23  0.130435  -17.80
+21               2  0.000000   -0.46
+22               1  1.000000    1.46
+
+Win Rate by Trade Duration (Quartiles):
+              Count  Win_Rate     PnL  Avg_Duration_Hrs
+duration_q                                             
+Q1 (Fastest)     41  0.219512 -208.28          2.400325
+Q2               33  0.000000 -148.45          4.000135
+Q3               37  0.486486  -32.47          6.616291
+Q4 (Longest)     37  0.540541  178.12         19.226239
