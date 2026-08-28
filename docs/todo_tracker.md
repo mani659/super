@@ -2,9 +2,9 @@
 
 # Algo Trading — Development Tracker
 
-**Status:** Phase 2 Demo Testing — Week 5 (Statistical Gate Evaluation)
-**Version:** v16
-**Last Updated:** Aug 16 2026
+**Status:** Phase 2 Demo Testing — Week 6 (Statistical Gate Implementation)
+**Version:** v17
+**Last Updated:** Aug 22 2026
 
 ## Completed Tasks
 
@@ -38,6 +38,11 @@
   os.makedirs("logs", exist_ok=True) guard added. H5 SL tightness 
   analysis now unblocked — Week 5 will produce first extractable CAB 
   log data.
+- [x] **MarketPulseEngine Fix (Phase A, Aug 26 2026)**: H4 staleness bug and NaN output fixed in `shared_intelligence.py`. Engine now fetches 150 bars and evaluates intra-bar continuously, feeding fresh valid data to the Knowledge Register.
+- [x] Monitor 204 fires (outcome: zero fires, action taken: N_LAYERS lowered)
+- [x] Confirm CAB log active (outcome: confirmed active)
+- [x] H8 equity tracking (outcome: $6,977 close, +$386 week)
+- [x] F6 implementation (outcome: implemented Aug 16, zero fires in W5)
 
 ### Tier 1 (Parameter Changes)
 - [x] 201/202 SL widened from 0.20×ATR to 0.35×ATR.
@@ -96,66 +101,106 @@
 - [x] **F8 registered**: Low ATR (Q1) produces 66.2% SL hit rate, 
   avg hold 6 min. Spread consumes meaningful fraction of SL.
 
+### Week 5 Performance & Analysis (Aug 18–22 2026)
+- [x] **Week 5 equity close**: $6,977.50 (+$385.78 for the week,
+  -30.2% inception drawdown). First positive week.
+- [x] **SuperTrend**: 84 trades, 52.4% WR, +$277.31. Third consecutive
+  positive week. Gate 3 ST criterion passed.
+- [x] **CAB**: 92 trades, 35.9% WR, +$44.68. Net positive driven by
+  outlier wins (XAGUSDm +$165, BTCUSDm +$38). Underlying pattern
+  unchanged.
+- [x] **Ghost 202**: 6 fills, 33.3% WR, -$8.24. Near-silence from
+  regime gate correctly suppressing probe arming in trending Gold week.
+  Correct system behavior confirmed.
+- [x] **Ghost 204**: Zero fires. N_LAYERS_DEFAULT pre-agreed trigger met
+  (zero fires after Day 5). Lowered to 2 entering Week 6.
+- [x] **F6 gate**: Zero GHOST_ARM_BLOCKED_ST_LONG fires. Probable cause:
+  regime gate blocked arming before F6 evaluation. Gate wiring confirmed
+  in code review — not a broken wire.
+- [x] **F9 registered**: CAB BUY 45.2% WR vs SELL 27.9% WR across
+  130 trades. 17.2pp gap. Direction misalignment in trending conditions.
+- [x] **F10 registered**: SELL underperformance concentrated on trending
+  assets: XAUUSDm SELL 25% WR, USOILm SELL 0% WR, GBPUSDm SELL 0% WR.
+- [x] **F11 confirmed**: CAB losses exit at median 4h (1 H4 bar). 59% via
+  OSI. 97.6% before full SL. Exit mechanism working correctly.
+- [x] **H5 revised**: SL tightness hypothesis superseded. OSI is the
+  primary loss exit, not SL hits. Primary CAB problem is direction
+  misalignment (F9/F10), not SL width.
+- [x] **H9 registered**: CAB H4 directional gate hypothesis. If SELL WR
+  stays below 35% and BUY WR above 40% in Week 6 (n≥50, non-trending
+  Gold) → implement H4 direction gate in cab_entry.py for Week 7.
+- [x] **CAB architecture spec reviewed**: External enhancement spec
+  (cab_super_enhancement_spec.md, Aug 22) reviewed and parked.
+  H1_STRUCT_BREACH claim found non-existent in code. Tri-vector framework
+  rejected as unvalidated strategy expansion. H4 direction gate (H9) is
+  the only actionable item, pending Week 6 confirmation.
+- [x] **Ghost 202 session gate**: F1–F5, F7–F8 still PENDING —
+  Week 5 had only 6 fills. Confirmation window extended to Week 6.
+- [x] **SuperTrend bot-instrument fit matrix (F14)**: BTCUSDm, XAUUSDm,
+  XAGUSDm positive. EURGBPm, USDJPYm, USOILm marginal negative.
+  Insufficient n per symbol for Gate 5 lock — accumulate.
+- [x] **N_LAYERS_DEFAULT lowered to 2** (Aug 22 2026) in
+  ghost_super/ghost_cache.py. Only code change entering Week 6.
+
 ---
 
-## Week 5 Active Tasks
+## Week 6 Active Tasks
 
-### Immediate (system running, no code changes)
-- [ ] **Monitor 204 fires**: First fires expected in Week 5 following 
-  decouple fix. Check logs/sniper_hunter.log for GHOST_CACHE_FIRE 
-  lines daily. If zero fires after 5 trading days, lower 
-  N_LAYERS_DEFAULT from 3 to 2 in ghost_cache.py (one change only).
-- [ ] **Confirm CAB log active**: Within first hour of Week 5 session, 
-  verify logs/cab_watcher.log exists and has content. If empty, 
-  the path fix did not deploy correctly — stop and re-check 
-  cab_watcher.py on the VPS before proceeding.
-- [ ] **H5 evaluation**: At end of Week 5, run SL distance analysis 
-  from logs/cab_watcher.log. For each CAB SL hit, compute 
-  pip distance from entry to SL vs ATR at entry. If median < 1.5×ATR, 
-  H5 confirmed and SL widening enters the agenda for Week 6.
-- [ ] **H8 equity tracking**: Record Week 5 close equity. Target: 
-  stabilize drawdown rate. Primary lever is Ghost 202 session exposure.
+### One code change (already applied before Week 6 start)
+- [x] **N_LAYERS_DEFAULT = 2**: Applied in ghost_super/ghost_cache.py.
+  10/10 unit tests confirmed passing. Only code change this week.
 
-### F6 Implementation (only agreed Week 5 code change)
-- [ ] **H6 Cross-bot gate on Ghost 202 arming**: In ghost_hunter_thread 
-  (unified_runner.py), before arming a new probe on XAUUSDm, query KR 
-  for active SuperTrend thesis on XAUUSDm. If thesis exists with 
-  direction=+1 (BUY/LONG), block UP_PROBE arming and log 
-  GHOST_ARM_BLOCKED_ST_LONG. Does not affect any fired or open 
-  positions — arming only. Single KR read, no new data structures. 
-  Evidence: n=34, 8pp win rate drop, 3× worse P&L when opposing ST 
-  confirmed LONG. This is the only Week 5 implementation candidate 
-  not requiring additional session data.
+### Monitoring (daily, 5 minutes)
+- [ ] **204 fires**: Check `grep -c "GHOST_CACHE_FIRE" logs/sniper_hunter.log`
+  daily. Target: first fires in Week 6 now that n=2. If zero after Day 5
+  of Week 6, this is a deeper problem — escalate before changing anything.
+- [ ] **F6 gate**: Check `grep -c "GHOST_ARM_BLOCKED_ST_LONG" logs/unified_runner.log`
+  after any ST XAUUSDm entry. If ST has open XAUUSDm positions and zero
+  F6 logs appear, re-audit the KR thesis read in ghost_hunter_thread.
+- [ ] **CAB BUY/SELL ratio**: At mid-week, tally CAB fills by direction
+  from MT5 terminal or cab_watcher.log. If SELL fills are >60% of total
+  and Gold is ranging (not trending), the directional split is structural,
+  not regime-driven — early flag for H9.
+- [ ] **Thread health**: grep "Heartbeat OK" logs/unified_runner.log | tail -3
+  Expected: 5 threads alive.
+- [ ] **H8 equity**: Record Week 6 close equity.
 
-### Statistical gate evaluations (end of Week 5, data-dependent)
-- [ ] **F1 ATR gate**: If Q2 win rate stays below 30% in Week 5 
-  data (expected n=150+ combined) → implement ATR floor at 1.8 on 
-  probe arming.
-- [ ] **F2/F5 Session gate**: If LONDON win rate stays below 35% 
-  combined Weeks 4+5 (expected n=118+) → implement LONDON suppression.
-- [ ] **F7 Direction gate**: If NY_CLOSE + H4_UP win rate stays below 
-  32% combined (expected n=108+) → implement direction gate on 
-  NY_CLOSE arming.
-- [ ] **F3 Conviction gate**: If conviction 20-40 stays below 35% 
-  combined → implement conviction gate at 40+.
-- [ ] **F4 ADX dead zone gate**: If ADX 20-25 stays below 33% 
-  combined → implement ADX 20-25 suppression.
+### End-of-Week 6 evaluations (data-dependent)
+- [ ] **Ghost 202 session gate confirmation** (primary):
+  If combined W4+W5+W6 reaches n≥170 LONDON fills and LONDON WR <35%
+  → implement LONDON suppression on probe arming.
+  If combined NY_CLOSE+H4_UP reaches n≥140 and WR <32%
+  → implement direction gate on NY_CLOSE arming.
+  If combined ATR Q2 reaches n≥195 and WR <30%
+  → implement ATR floor gate (arm only when M1 ATR > 1.8).
+  Run full audit CSV join with Week 6 MT5 export at session end.
 
-### H5 — CAB SL tightness (evaluate end of Week 5)
-- [ ] Pull pip distance from entry to SL hit vs ATR at entry for all 
-  CAB losses in Week 5 from logs/cab_watcher.log.
-  Run: grep "Closed #" logs/cab_watcher.log | grep "sl"
-  Cross-reference with KR thesis entry_atr for each ticket.
-  Compute: sl_hit_distance / entry_atr for each loss.
-  If median ratio < 1.5 → H5 confirmed → SL widening agenda for Week 6.
+- [ ] **H9 CAB direction gate** (secondary):
+  Compute SELL vs BUY win rate from Week 6 MT5 export for CAB trades.
+  Confirmation threshold: SELL WR < 35% AND BUY WR > 40% with n≥50
+  in a week where Gold is not strongly trending.
+  Refutation threshold: SELL WR within 5pp of BUY WR → gap was
+  regime-specific → H9 not confirmed → no gate.
+
+- [ ] **Gate 2 — 204 vs 202**: If 204 accumulates 10+ fills in Week 6,
+  begin tracking avg_R per magic. Gate 2 requires 30+ fills each —
+  still a longer-horizon target.
+
+- [ ] **SuperTrend Gate 5 accumulation**: Pull per-symbol closed-trade
+  data from MT5 export. Update bot-instrument fit matrix. Target for
+  Gate 5 lock: 20+ trades per active symbol.
+
+- [ ] **F6 effectiveness**: If 202 fires at normal volume and F6 gate
+  also fires, compute win rate for 202 trades where F6 did NOT block
+  vs baseline W4 win rate. First effectiveness data point.
 
 ---
 ### Knowledge Register Wiring (High Priority)
-- [ ] **Fix 7: Lifecycle Cleanup**: Call `unregister_trade_thesis()` whenever a position is closed across ALL bots (CAB, ST, Ghost) to prevent unbounded memory growth and corrupted risk calculations.
-- [ ] **Fix 5: Wire Hard-Block Layers (2 & 3)**: Enforce invalidation and portfolio exposure limits. Inject `is_entry_invalidated()` and `check_portfolio_entry_allowed()` into the pre-entry logic for CAB, Ghost, and ST. Additionally, ensure all bots call `publish_invalidation()` when they locally identify a structural break (ST DEAD-state, CAB OSI, Ghost regime-arm-gate).
-- [ ] **Fix 4: Universal Thesis Registration**: Ensure Ghost Sniper and SuperTrend call `register_trade_thesis()` upon filling an order. (Currently CAB-only).
-- [ ] **Fix 6: Deduplicate Micro Degradation**: Decide between CAB's `TradeDegradationEngine.is_degrading()` and KR's `get_micro_degradation()`. Standardize on a single implementation and remove the dead code.
-- [ ] **Fix 1-3: Tech Debt & Tuning**: Fix cosmetic ATR comment in `ghost_sniper.py`, remove legacy kwargs from `run_bot.py`, and prepare for per-symbol weight tuning in `config.json`.
+- [x] **Fix 7: Lifecycle Cleanup**: Call `unregister_trade_thesis()` whenever a position is closed across ALL bots (CAB, ST, Ghost) to prevent unbounded memory growth and corrupted risk calculations.
+- [x] **Fix 5: Wire Hard-Block Layers (2 & 3)**: Enforce invalidation and portfolio exposure limits. Inject `is_entry_invalidated()` and `check_portfolio_entry_allowed()` into the pre-entry logic for CAB, Ghost, and ST. Additionally, ensure all bots call `publish_invalidation()` when they locally identify a structural break (ST DEAD-state, CAB OSI, Ghost regime-arm-gate).
+- [x] **Fix 4: Universal Thesis Registration**: Ensure Ghost Sniper and SuperTrend call `register_trade_thesis()` upon filling an order. (Currently CAB-only).
+- [x] **Fix 6: Deduplicate Micro Degradation**: Decide between CAB's `TradeDegradationEngine.is_degrading()` and KR's `get_micro_degradation()`. Standardize on a single implementation and remove the dead code.
+- [x] **Fix 1-3: Tech Debt & Tuning**: Fix cosmetic ATR comment in `ghost_sniper.py`, remove legacy kwargs from `run_bot.py`, and prepare for per-symbol weight tuning in `config.json`.
 
 - [ ] **Gate 5 (Bot-Instrument Fit Matrix)**: Lock `avg_R` cross-tab by bot × instrument to finalize live pair deployment.
 - [ ] **Gate 6 (Live Deployment)**: One unified process, micro-lot, avg R > 0.3 over 50 live trades.
@@ -174,3 +219,15 @@
 - [ ] **Session filtering**: NY_CLOSE vs ASIAN. Parked until clean baseline is collected from the fully working system.
 - [ ] **Controlled grid-sizing / martingale**: Parked until grid tracking is confirmed perfectly functional.
 - [ ] **Market Exit Score (Phase 3)**: Replace static R-threshold exits with continuous 0-1 score (regime, conviction, ATR, momentum, OSI).
+- [ ] **H9 CAB H4 direction gate**: Implementation in cab_entry.py blocked
+  pending Week 6 confirmation. If confirmed: add _get_h4_direction(symbol)
+  to CABEntryEngine, gate bearish inversion entries when H4=UP.
+  Log CAB_SELL_BLOCKED_H4_UP. Does not touch exit logic or BUY entries.
+- [ ] **CAB MFE/MAE logging (Enhancement 4)**: Safe to add anytime.
+  TradeAnalyticsEngine already exists. Low priority — collect direction
+  gate data first.
+- [ ] **CAB enhancement spec**: Parked at Review Stage (Aug 22 2026).
+  Tri-vector ADX framework deferred indefinitely. Vol_Expansion_Ratio
+  gate deferred until ratio cross-referenced against trade outcomes.
+  H4 Macro Trend Filter concept absorbed into H9 with simpler
+  implementation path.

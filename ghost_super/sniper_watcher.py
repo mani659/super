@@ -776,7 +776,16 @@ def _close_market(pos, exit_reason):
         # ── Unified Trade Ledger: GHOST EXIT ─────────────────────────────
         if write_trade_event:
             is_buy = (pos.type == 0)
-            risk_dist = abs(pos.price_open - pos.sl)
+            try:
+                from data.trade_ledger import get_initial_risk, clear_initial_risk
+                risk_dist = get_initial_risk(pos.ticket)
+                clear_initial_risk(pos.ticket)
+            except ImportError:
+                risk_dist = None
+                
+            if risk_dist is None:
+                risk_dist = abs(pos.price_open - pos.sl)  # Fallback
+
             r_mult = None
             if risk_dist > 1e-10:
                 pm = (price - pos.price_open) if is_buy else (pos.price_open - price)

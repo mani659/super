@@ -14,7 +14,7 @@ from v2.execution.mt5_gateway import MT5Gateway
 from v2.execution.order_router import OrderRouter
 from v2.core.utils import calculate_dynamic_lot, is_session_active
 
-logger = logging.getLogger("CABBotV2")
+logger = logging.getLogger("CABSuperBotV2")
 
 @dataclass
 class CABConfig:
@@ -226,7 +226,7 @@ class CABBot:
 
         ts = TradeSignal(
             symbol=self.config.symbol,
-            bot_name="CABBotV2",
+            bot_name="CABSuperBotV2",
             magic_number=self.config.magic_number,
             order_type=order_type,
             sl_price=sl
@@ -257,7 +257,7 @@ class CABBot:
                     ticket=res.order,
                     symbol=self.config.symbol,
                     direction=1 if order_type == mt5.ORDER_TYPE_BUY else -1,
-                    bot_system="CABBotV2",
+                    bot_system="CABSuperBotV2",
                     setup_type="H4_INVERSION",
                     fill_price=fill_price,
                     initial_sl=sl,

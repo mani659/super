@@ -1,0 +1,10 @@
+Total GHOST_CACHE_FIRE events across all log rotations: 0
+Total ARMED events in hunter log: 0
+
+ACTION REQUIRED: Zero 204 fires.
+If this is end of Day 5+, lower N_LAYERS_DEFAULT from 3 to 2
+in ghost_super/ghost_cache.py — one change only.
+
+F6 gate (GHOST_ARM_BLOCKED_ST_LONG) fires: 0
+Zero F6 fires. If ST had open XAUUSDm positions this week,
+the gate wire may be broken — check KR thesis read in hunter thread.

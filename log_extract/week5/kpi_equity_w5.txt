@@ -1,0 +1,24 @@
+KPI ledger rows (Week 5): 6259
+
+Week 5 equity range:
+  Start (first row): 6590.72
+  End   (last row):  6976.68
+  Min:               6463.07
+  Max:               6995.65
+  Week 5 P&L:        385.96
+
+Open positions (time-averaged):
+  Avg open 202:        0.00
+  Avg open SuperTrend: 0.39
+  Avg open CAB:        6.64
+  Avg open total:      7.68
+
+Regime distribution (XAUUSDm, Week 5):
+regime_xauusd
+RANGING          2988
+TRENDING_UP      1484
+TRENDING_DOWN     935
+UNKNOWN           852
+Name: count, dtype: int64
+
+Circuit breaker active rows: 0

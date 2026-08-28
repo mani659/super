@@ -35,6 +35,18 @@ def run_brain():
     print(f"Ledger Output Path: {config.LEDGER_FILE}")
     print(f"==================================================")
     
+    # Pre-fetch and display currently managed open positions
+    active_positions = mt5.positions_get()
+    managed_count = 0
+    if active_positions:
+        for pos in active_positions:
+            if pos.magic == config.MAGIC_NUMBER and pos.symbol in config.SYMBOLS:
+                logging.info(f"Resuming management of open position: {pos.symbol} (Ticket: {pos.ticket})")
+                managed_count += 1
+    
+    if managed_count == 0:
+        logging.info("No active CAB positions to resume. Awaiting new signals...")
+        
     while True:
         try:
             if not connection.is_connected():

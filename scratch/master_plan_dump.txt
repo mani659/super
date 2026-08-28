@@ -1,0 +1,339 @@
+
+All projects
+Algo Trading Bot
+A three-bot algorithmic trading system
+
+How can I help you today?
+You are out of free messages until 4:30 AM
+Recents
+Memory
+Only you
+Purpose & context Salman is developing a unified algorithmic trading system for MT5, targeting eventual live deployment after rigorous demo validation. The system trades XAUUSDm, EURUSDm, GBPUSDm, and XAGUSDm on an Exness MT5 demo account. Three complementary bots operate under a single Python process (unifiedrunner.py): Ghost Grid (magic 201/202/204) — mean-reversion on M1 Gold, restructured to clean entry/exit trades with broker-side fixed TP targets; magic 204 redesigned as the sole genuine grid mechanism firing at confirmed exhaustion levels SuperTrend — M30 trend-following; now absorbs the former magic 203 trend-follow leg removed from Ghost Grid CAB Watcher — H4 inversion entries with fluid position management The overarching goal is to prove mechanical soundness in demo before adding complexity. A future possibility of prop firm challenges has been noted but explicitly deferred. Current state Week 2 of demo testing is underway following deployment of a comprehensive fix bundle. Key bugs resolved before Week 2: Ghost Grid TP was never being set for the vast majority of trades CAB Watcher was only managing XAUUSDm positions despite opening on multiple pairs Ghost Cache magic 204 was never instantiated in the live thread Per-personality TP ratios established (201=1.0R, 202=1.5R, 204=2.0R) BE-lock ratchet implemented; OOB emergency TP added Log spam bug fixed (GridState depth cap warnings firing every 2 seconds per overflow ticket) Daily equity circuit breaker (10% drawdown) wired into SharedState and all bot threads Per-instrument position caps raised to 4 for ST and CAB; global position cap removed Silent crash in closeposition() when tick=None fixed; blanket processedactions reset on reconnect fixed Architecture restructuring in progress: magic 203 code is being removed from ghostsniper.py; dirfollow and sldistwide identified as dead variables requiring removal. On the horizon Review Week 2 demo data before making any further architectural decisions BE-lock step ratchet and session filtering decisions explicitly deferred until Week 2 results are reviewed Session filtering remains off; all sessions open for Week 2 Knowledge Register concept designed but not yet implemented — a shared intelligence ledger where each bot contributes analytical outputs (e.g., K-Means confirming non-trending conditions increasing Ghost Grid's reversion confidence) Market Exit Score (MES) — Phase 3 roadmap: a continuous 0–1 exit scoring system replacing static R-threshold exits, drawing from regime alignment, conviction trend, ATR trajectory, directional momentum, and opposite signal quality CAB Signal Sync (Neural Link) — fully designed but pending implementation; 5-band sliding decision table gated by conviction score (bodyratio × 0.6) + (bodysizeinATR × 0.4) > 0.65 Walk-forward validation needed to address parameter overfitting risk before live deployment Key learnings & principles Isolate one variable at a time: collect clean data before deciding; do not layer filters or additional changes on top of unconfirmed mechanical fixes R-multiples as outcome measurements, not decision triggers: every exit decision should be driven by market intelligence Sequential same-direction entries represent directional confirmation, not compounding risk — justifying MAXLEGS=4 and per-instrument caps of 4 for ST and CAB MAXLEGS=4 is non-negotiable during demo — accumulation architecture must be preserved for clean data collection Flat TP against a wider SL creates a structurally unviable win-rate requirement; per-personality TP ratios resolved this Martingale-style grid sizing was evaluated and rejected on critical analysis Demo vs. live execution quality gap and Gold concentration remain acknowledged structural risks Approach & patterns Strongly prefers data-grounded, critical analysis over agreement — explicitly values pushback on proposals Systematic audit-first approach: confirm prior fixes deployed correctly before building new features Architecture changes are deliberate and sequenced; defers decisions until relevant data is collected Keeps non-negotiable constraints clearly stated and documented upfront Uses a project context markdown file (UNIFIEDBOTCONTEXT.md) and versioned todo tracker to maintain continuity across sessions Tools & resources Platform: MetaTrader 5 (MT5) via Exness demo account Language: Python (unifiedrunner.py) + MQL5 (failover EA) Infrastructure: VPS deployment Reference docs: UNIFIEDBOT_CONTEXT.md, versioned todo tracker (v13+) Analytical methods: K-Means clustering (regime detection), ATR-based sizing, conviction scoring
+Last updated 7 hours ago
+Instructions
+UNIFIED_BOT_CONTEXT.md, Master plan document & todolist
+Files
+AlgoTrading_MasterPlan.docx
+ALGO TRADING SYSTEM — MASTER DEVELOPMENT PLAN **CONFIDENTIAL** 
+  
+**ALGO TRADING SYSTEM** 
+  
+**Master Development ****&**** Enrichment Plan** 
+  
+*SuperTrend · CAB Watcher · Ghost Grid Reversion* 
+  
+| **Document Status** | Active — Development Phase 0 | 
+| --- | --- | 
+| **Prepared** | April 2026 | 
+| **Test Environment** | Demo accounts — Exness MT5 | 
+| **Instruments** | XAUUSD.x · XAUUSDm · EURUSDm · GBPUSDm | 
+| **Lot Size** | 0.01 (demo phase) | 
+  
+# **1. Executive Summary** 
+  
+This document is the master development plan for a three-bot algorithmic trading system. Each bot has been critically assessed, a targeted enrichment plan devised for each individually, and a phased roadmap established that culminates in a unified single-process architecture. The plan proceeds in four phases: individual enrichment, individual conviction testing, cross-validation, and finally unified architecture construction. 
+  
+**The Three Bots — Summary Role Assignment** 
+  
+| **Bot** | **Strategy Class** | **Active Regime** | **Survival Score** | 
+| --- | --- | --- | --- | 
+| **SuperTrend v2.2** | M30 Trend Following | TRENDING ADX 55+ | **5.5 / 10 → 7.5 target** | 
+| **CAB Watcher v16.3** | Position Watcher Only | All regimes (watchdog) | **6.0 / 10 → 8.0 target** | 
+| **Ghost Grid Reversion v5** | Ghost Cache + Mean Rev | RANGING ADX ≤ 35 | **Unscored — watcher mismatch** | 
+  
+# **2. Critical Assessment — Each Model** 
+  
+## **2.1 SuperTrend Bot v2.2** 
+  
+| **5.5** | **Current live survival probability — Strategy: 7/10 │ Production readiness: 4/10** | 
+| --- | --- | 
+  
+**What it gets right:** 
+  
+- Strategy class is sound — M30 trend following has decades of independently verified positive expectancy across liquid markets. 
+  
+- K-Means optimal factor selection is a genuine innovation over fixed-parameter SuperTrend systems. 
+  
+- SI score and state machine (INCUBATING → CONFIRMED → DECAYING → DEAD) is the best position management architecture of the three bots. 
+  
+- Bar-aware cache is production-grade engineering — eliminates ~59× redundant ATR computations per M30 bar. 
+  
+- Dynamic incubation bars per regime shows genuine market awareness. 
+  
+**Critical failures blocking live deployment:** 
+  
+- No failover mechanism — Python crash leaves positions unmanaged with only a hard SL. This is not a theoretical risk; it is a certainty over time. 
+  
+- Equity curve filter is disabled by default — the code is written correctly but the safety mechanism is turned off. 
+  
+- SI weights are not tuned per symbol — cluster=0.40, regime=0.25, adx=0.20, vol=0.15 are the same defaults across all instruments. 
+  
+- Volume component uses tick volume. On EURUSDm during Asian and overnight sessions, tick volume correlation degrades significantly. 
+  
+- K-Means uses last 100 bars for factor selection — regime transitions create a 10–20 bar lag window of mismatched factor after every major regime change. 
+  
+- incubation_bars_trending = 1 means active SL management starts after just 30 minutes — too fast for an M30 strategy to breathe. 
+  
+## **2.2 CAB Watcher v16.3 + MQL5 Watchdog** 
+  
+| **6.0** | **Current live survival probability — Watcher architecture: 8/10 │ Management logic: 5/10** | 
+| --- | --- | 
+  
+**What it gets right:** 
+  
+- Most production-ready infrastructure of the three — MQL5 two-tier heartbeat failover (60s warn, 120s hard) is essential engineering. 
+  
+- Spread guards and STOPS_LEVEL checks on every modify prevent silent broker rejections. 
+  
+- Percentile regime classifier (ADX/ATR/body three-signal) is scale-invariant and zero-dependency. 
+  
+- Fluid matrix concept (Harvester / Protector / Reaper) is internally consistent with a clear management philosophy. 
+  
+**Critical failures and limitations:** 
+  
+- REAPER at -0.5R in TRENDING is the most dangerous setting. XAUUSD routinely retraces 0.4–0.8R in a normal pullback before continuing. This will mechanically cut correct trades. 
+  
+- HARVESTER is all-or-nothing at 2R — no partial close, no runner. Positions that have further to go after EXHAUSTION is detected are closed completely. 
+  
+- Between milestone events (Protector / Harvester / Reaper), there is zero active management. A position can decay from 1.3R to 0.5R and the watcher does nothing. 
+  
+- CAB is a watcher only — it cannot assess entry quality. Its survival rating is wholly dependent on whatever generates the positions it watches. 
+  
+- No session awareness — manages XAUUSD positions identically at 2:00 AM Asian session and 14:00 London/NY overlap. 
+  
+## **2.3 Ghost Grid Reversion — Ghost Sniper v5.0 + Watcher v3.0** 
+  
+| **?** | **Cannot score fairly — the watcher personality contradicts the strategy philosophy** | 
+| --- | --- | 
+  
+The critical finding from the full design discussion is that the Ghost Sniper as currently deployed is NOT the strategy originally conceived. Understanding this distinction is the single most important insight in this document. 
+  
+**The original concept — Ghost Cache Grid:** 
+  
+- Run a virtual (ghost) grid in memory — no real trades — accumulating positions against the market move. 
+  
+- Detect market exhaustion by tracking where the nth virtual layer would have been placed. 
+  
+- Fire ONE real entry at the statistically derived n-1 reversion zone — the high-probability mean-reversion point. 
+  
+- The 5-bar breakout trigger is NOT arbitrary — it was derived from tick data backtesting and represents the empirically validated nth position in the virtual grid. 
+  
+**What is actually running now:** 
+  
+- The Hunter correctly fires a single entry at the probe-retraction point — this part works and the entries look visually clean after two weeks of demo. 
+  
+- The Watcher (ported from CAB philosophy) immediately contradicts the strategy — it kills positions with a 1.5–1.8×ATR reaper at precisely the moment the ghost grid says the trade needs room to find its reversion. 
+  
+- Two weeks of demo at 0.01 lot on XAUUSD with only $150 loss while running naked (no filters) is a meaningful survival signal for the entry model. 
+  
+**Why the current watcher is the wrong tool:** 
+  
+- A defensive single-trade watcher (CAB-style) is designed to minimise loss on individual positions. The ghost grid philosophy requires surviving through the accumulation zone — the exact adverse move the reaper is cutting. 
+  
+- The per-position reaper has no knowledge of the ghost grid state. It does not know whether price at -1.8×ATR represents a genuine failure or the approach of the next virtual grid layer (which may signal imminent exhaustion and reversal). 
+  
+# **3. Regime Complementarity Map** 
+  
+The three bots are not competitors — they are regime-complementary. This is the architectural foundation of the eventual unified system. 
+  
+| **Regime** | **ADX Signal** | **SuperTrend** | **Ghost Grid** | **CAB** | 
+| --- | --- | --- | --- | --- | 
+| **RANGING** | ADX ≤ 35 | SLEEPING | **ACTIVE 201+202** | Watching | 
+| **STABLE** | ADX 35–55 | Watching | 201 only (caution) | Watching | 
+| **TRENDING** | ADX 55+ directional | **ACTIVE entries** | 202 BLOCKED, 203 fires | REAPER alert | 
+| **EXHAUSTION** | ATR spike, weak body | Exits via DEAD state | 202 fading signal | **HARVESTER fires** | 
+  
+# **4. Phase 1 — Individual Bot Enrichment** 
+  
+Each bot receives targeted intelligence transplants from the other two — suited to its own strategy strengths. No rewrites. Targeted upgrades only. Duration: 1 week of implementation and validation on demo before Phase 2 begins. 
+  
+| **4.1** | **SuperTrend Bot v2.2 — Enrichment Plan** | 
+| --- | --- | 
+  
+| **#** | **Intelligence Source** | **What Changes** | **Priority** | 
+| --- | --- | --- | --- | 
+| **1** | **MQL5 Watchdog** *from CAB* | Port the heartbeat failover EA. Add 2-line heartbeat write to run_cycle(). Cover SuperTrend magic numbers. This is non-negotiable before any live capital. | **CRITICAL** | 
+| **2** | **Equity Curve Filter** *internal — already built* | Change equity_filter_enabled default to True. Set period=20 cycles, min_ratio=0.97. The code is correct — it is simply switched off. | **CRITICAL** | 
+| **3** | **Conviction Score** *from Ghost Sniper* | Add Sniper's conviction composite (ADX × 1.0 + momentum_body × 0.5) as a pre-entry gate in run_cycle(). Only open new positions when conviction > 45. | **HIGH** | 
+| **4** | **R-Multiple Tracking** *from CAB* | Add signed R-multiple to _record_closed_trade() and watcher log. Essential for evaluating SI-at-entry vs outcome correlation during Phase 2. | **HIGH** | 
+| **5** | **Session Gate** *from Ghost Sniper* | Add session tagging (ASIAN/LONDON/NY_OVERLAP) to run_cycle(). Suppress new entries during Asian session (00:00–07:00 UTC) for EURUSDm and GBPUSDm. | **HIGH** | 
+| **6** | **Incubation Adjustment** *internal* | Raise incubation_bars_trending from 1 to 2. Give trend entries 60 minutes breathing room before active SL management starts on M30. | **MEDIUM** | 
+| **7** | **Multi-TF ATR** *from CAB* | Add M15 ATR calculation for SL buffer sizing. Use M30 ATR for position sizing, M15 ATR for STOPS_LEVEL buffer on SL placement. | **MEDIUM** | 
+  
+| **4.2** | **CAB Watcher v16.3 — Enrichment Plan** | 
+| --- | --- | 
+  
+| **#** | **Intelligence Source** | **What Changes** | **Priority** | 
+| --- | --- | --- | --- | 
+| **1** | **SI Score (simplified)** *from SuperTrend* | Add 3-input SI score: regime match vs entry, ADX rank movement direction, R-multiple trajectory. SI gates the REAPER: require r ≤ -0.5 AND si < 0.45 to fire. Eliminates premature cuts. | **CRITICAL** | 
+| **2** | **Partial Close Harvester** *from SuperTrend* | Convert HARVESTER from all-or-nothing to: close 50% at 2R in EXHAUSTION, trail remainder with 1.5×M15 ATR stop. Keeps a runner when the move has further to go. | **HIGH** | 
+| **3** | **Continuous Management** *from SuperTrend state machine* | Add a light SL tightening pass every cycle between milestone events. Move SL toward entry as position extends profit — not just at fixed R thresholds. | **HIGH** | 
+| **4** | **Session Awareness** *from Ghost Sniper* | Add session gate suppressing REAPER during Asian session (00:00–07:00 UTC) on XAUUSD. Low liquidity produces false adverse moves that trigger premature cuts. | **HIGH** | 
+| **5** | **ER (Efficiency Ratio)** *from SuperTrend* | Add Kaufman ER to REAPER decision. Require: r ≤ -0.5 AND si < 0.45 AND er < 0.25 for 2+ cycles. Confirms the trade is both losing AND directionless before cutting. | **MEDIUM** | 
+| **6** | **Conviction Score** *from Ghost Sniper* | Log conviction score every cycle per position. Adds market context to post-analysis — correlate conviction at milestone events with trade outcomes. | **MEDIUM** | 
+  
+| **4.3** | **Ghost Grid Reversion — Enrichment Plan** | 
+| --- | --- | 
+  
+**IMPORTANT: **The primary change is a complete replacement of the watcher personality. The hunter entry logic is largely preserved — the entries are visually clean and statistically grounded. 
+  
+| **#** | **Intelligence Source** | **What Changes** | **Priority** | 
+| --- | --- | --- | --- | 
+| **1** | **Grid-State Watcher** *new — replace CAB watcher* | Remove per-position reaper. Build grid-level watcher that reads ghost cache state. Acts on combined grid P&L, not individual position P&L. This is the single highest priority change. | **CRITICAL** | 
+| **2** | **Grid Take-Profit** *new logic* | When combined grid P&L crosses target equivalent to 1R on first layer risk, close all real positions. This is the exit signal that matches the ghost grid philosophy. | **CRITICAL** | 
+| **3** | **Hard Grid Stop** *new logic* | Define maximum loss before Phase 2 begins. Recommend: 3× first layer risk as grid stop-loss. If price reaches grid stop, close all positions. Non-negotiable risk control. | **CRITICAL** | 
+| **4** | **Exhaustion Detection Gate** *from SuperTrend/CAB regime engine* | Replace raw ADX gate thresholds with percentile regime classifier. Gate_202 becomes: si < 0.55 (continuous). Gate_203: regime == TRENDING and conviction > 65. Eliminates hard cliff at ADX=40. | **HIGH** | 
+| **5** | **Probe Significance Filter** *new logic* | Add minimum probe significance: armed condition requires probe move > 0.3 × H1 ATR. Filters trivial micro-breakouts that currently trigger on low-volatility noise. | **HIGH** | 
+| **6** | **ATR Position Sizing** *from SuperTrend* | Replace fixed LOT_SIZE = 0.01 with ATR-based calculation. Risk a fixed percentage of balance per trade with SL defined by ghost grid geometry, not a fixed lot. | **HIGH** | 
+| **7** | **Session Gate (Asian suppression)** *from Ghost Sniper / CAB* | Suppress ghost arming during Asian-to-London transition (07:00–08:30 UTC). False breakouts on XAUUSD are concentrated in this window. | **MEDIUM** | 
+| **8** | **Bar-Aware Cache** *from SuperTrend* | Apply bar-aware caching to M1 ATR and ADX calculations. Currently recomputed every 10ms loop tick. Cache on bar close — safe because grid step uses bar-close ATR. | **MEDIUM** | 
+  
+# **5. Phase 2 — Individual Conviction Testing** 
+  
+All three enriched bots run simultaneously on demo for 2 weeks. Each bot is evaluated independently against its own success criteria. This phase proves individual edge before any combination work begins. Bots that fail their conviction gate stay in Phase 2 for a further week with targeted adjustments. 
+  
+## **5.1 SuperTrend — Conviction Criteria** 
+  
+| **Metric** | **Gate to Pass** | **Action if Failed** | 
+| --- | --- | --- | 
+| **Positive expectancy** | Avg P&L per trade > 0 after spread across ≥ 30 trades | Review SI weight calibration per symbol | 
+| **SI vs outcome correlation** | High-SI entries (>0.65) win rate > low-SI (<0.50) by 15%+ | Re-examine cluster weight and volume weight | 
+| **Equity filter activations** | < 3 activations per week (filter working, not over-sensitive) | Adjust min_ratio or filter period | 
+| **Cache efficiency** | Cache hit rate > 90% (logged on shutdown) | Investigate if timeframe setting is correct | 
+| **Watcher state distribution** | CONFIRMED > 40% of managed bars across all trades | Review incubation_bars settings | 
+| **Failover test** | Manually kill Python — MQL5 EA takes over within 120s | Fix before any further testing | 
+  
+## **5.2 CAB Watcher — Conviction Criteria** 
+  
+| **Metric** | **Gate to Pass** | **Action if Failed** | 
+| --- | --- | --- | 
+| **REAPER accuracy** | < 30% of REAPER-closed positions would have recovered to profit | Widen SI gate or raise R threshold | 
+| **Partial HARVESTER outcomes** | Runner (kept 50%) reaches further profit in > 50% of cases | Adjust partial close fraction | 
+| **Between-milestone management** | SL tightening fires on > 60% of profitable positions | Review tightening logic trigger conditions | 
+| **Session gate effectiveness** | Asian-session REAPER fires reduced by > 50% vs baseline | Extend suppression window if needed | 
+| **R-multiple distribution** | Average closed R > 0.5 across all managed positions | Review milestone thresholds globally | 
+  
+## **5.3 Ghost Grid Reversion — Conviction Criteria** 
+  
+| **Metric** | **Gate to Pass** | **Action if Failed** | 
+| --- | --- | --- | 
+| **Grid watcher validation** | Zero reaper fires on individual positions — grid-level only | Watcher personality still wrong — rebuild | 
+| **Grid TP rate** | Combined grid reaches TP target in > 40% of grids opened | Investigate if probe significance filter is too loose | 
+| **Grid stop rate** | Hard grid stop fires in < 20% of grids | Widen grid stop or tighten arming conditions | 
+| **Average grid depth at TP** | Record average virtual layers active at TP — validates n hypothesis | Recalibrate n from live data if < 2 or > 5 | 
+| **Daily grid count** | < 6 grids opened per day (down from 76 peak) | Probe significance filter needs tightening | 
+| **Entry visual quality** | Subjective — entries still look clean with new filters applied | If entries degrade, probe filter is too aggressive | 
+  
+# **6. Phase 3 — Cross-Validation ****&**** Pre-Combination** 
+  
+Before combining bots into one process, this phase runs all three enriched bots simultaneously and validates that their regime activations are genuinely complementary in practice — not just in theory. Duration: 1 week. 
+  
+**Key observations to record during Phase 3:** 
+  
+- Track regime classification timestamps across all three bots — confirm that SuperTrend TRENDING entries and Ghost Grid RANGING entries do not overlap in time more than 10% of cases. 
+  
+- Track total daily P&L across all three bots combined — does the portfolio smooth out compared to individual bots? 
+  
+- Record any instances where all three bots are simultaneously in active positions — this represents full capital deployment and should be examined for correlation risk. 
+  
+- Confirm the MQL5 watchdog handles all three bots' magic numbers correctly under failover. 
+  
+- Record CPU and RAM usage with three separate Python processes as baseline for comparison against unified architecture. 
+  
+**Decision gate to exit Phase 3:** 
+  
+- All three bots individually passed their Phase 2 conviction criteria. 
+  
+- Combined portfolio shows lower peak drawdown than any individual bot alone. 
+  
+- Regime overlap (all three active simultaneously) < 15% of total trading time. 
+  
+- No regime conflict observed — SuperTrend and Ghost Grid never opening opposing positions on the same instrument. 
+  
+# **7. Phase 4 — Unified Architecture** 
+  
+One Python process. One MT5 connection. One regime classifier. Three strategy engines activated by regime. This phase begins only after all three bots have individually proven their edge in Phases 2 and 3. 
+  
+## **7.1 Architecture Layers** 
+  
+| **Layer** | **Name** | **Responsibility** | 
+| --- | --- | --- | 
+| **0** | **Shared Intelligence** | Fetch M1/M15/M30/H4 data once. Compute regime classifier, conviction, ATR, H4 breakout detector. All engines read from shared state object — no duplicate API calls. | 
+| **1** | **Regime Router** | One decision per cycle: RANGING → Ghost Grid active; TRENDING → SuperTrend active; EXHAUSTION → CAB Harvester; H4 break → structural bias applied. Replaces three separate regime classifiers. | 
+| **2** | **Strategy Engines** | SuperTrend engine (K-Means, M30 entry), Ghost Grid engine (probe detect, ghost cache, M1), CAB engine (Harvester/Protector/Reaper). Each engine receives shared state from Layer 0 — no own data fetch. | 
+| **3** | **Unified Watcher** | Per-magic dispatch: 201→scalp-BE, 202→grid-manager, 203→ATR-trail, ST_MAGIC→SI state machine, CAB_MAGIC→Harvester-Protector. One watcher loop manages all positions from all strategies. | 
+| **4** | **Risk Orchestration** | Global position cap across all strategies. Equity curve filter (unified). Per-strategy max positions. Symbol isolation. Session gate applied globally. | 
+| **5** | **MQL5 Failover** | Single EA covering all magic numbers. Heartbeat from unified Python process. 60s warn, 120s hard failover with 5×ATR airbag trail on all open positions. | 
+  
+## **7.2 Build Sequence** 
+  
+Build order is designed to minimise regression risk — each step is independently testable before the next begins. 
+  
+- **Merge Ghost Sniper brain + hunter into one process. **Currently split into two scripts communicating via CSV file. This IPC overhead disappears in the unified bot — start eliminating it now. 
+  
+- **Extend SuperTrend MultiPairRunner as master orchestrator. **The MultiPairRunner is already the right skeleton. Add a GhostGridEngine class following the same run_cycle() interface and plug it in. 
+  
+- **Add H4 breakout detector to Layer 0 shared intelligence. **H4 data fetch is cheap. Output: h4_bias = LONG | SHORT | NEUTRAL. Suppresses Ghost Grid 202 and confirms SuperTrend direction. 
+  
+- **Absorb CAB Harvester/Protector/Reaper as additional magic handlers. **Extend the unified watcher dispatch dict with CAB magic numbers and their upgraded SI-gated management logic. 
+  
+- **Update MQL5 watchdog to cover all magic numbers in one EA. **Single heartbeat. All magic numbers under one failover umbrella. Replaces three separate failover concerns with one. 
+  
+## **7.3 Expected Resource Savings from Unification** 
+  
+| **Resource** | **Current (3 separate processes)** | **Unified (estimate)** | 
+| --- | --- | --- | 
+| **MT5 connections** | **3** | **1** | 
+| **M1 data fetches / min** | **~180 (60 each × 3)** | **~60 (shared)** | 
+| **Regime classifier runs / min** | **3 separate computations** | **1 shared result** | 
+| **ATR/ADX computations / bar** | **~180 (3 bots × 60 cycles)** | **~3 (bar-aware cache)** | 
+| **IPC overhead** | **CSV read/write every 10s** | **In-memory shared object** | 
+| **MQL5 EAs required** | **1 (CAB only, others exposed)** | **1 (covers all magics)** | 
+  
+# **8. Risk Management Framework** 
+  
+These rules apply across all phases and all bots. They are non-negotiable constraints, not suggestions. 
+  
+## **8.1 Capital Exposure Rules** 
+  
+- No bot moves to live capital until it has passed its Phase 2 conviction gate. 
+  
+- Live deployment begins at micro-lot sizing (0.01) for a minimum 2-week live test before scaling. 
+  
+- The gap between demo and live is largest for Ghost Grid (M1, execution-sensitive) and smallest for SuperTrend (M30, slower signal). Plan for more live micro-lot test time for Ghost Grid. 
+  
+- Maximum combined drawdown per day across all bots: define this number before Phase 2 begins and enforce it mechanically, not discretionally. 
+  
+## **8.2 Ghost Grid Specific Hard Rules** 
+  
+- Hard grid depth cap: maximum 4 real entries per grid. Non-negotiable. A trending day without this cap converts accumulation into geometric loss. 
+  
+- Grid stop-loss: defined as 3× first layer risk. If combined grid P&L reaches this level, close all positions immediately. 
+  
+- Minimum ATR reset before re-arming: after a grid closes at stop-loss, require price to move at least 1 full ATR before arming the next grid. 
+  
+- Do not increase grid depth cap or widen grid stop during demo testing. These are the parameters that keep a grid strategy survivable. Evaluate them statistically after 50+ grids, not impressionistically. 
+  
+## **8.3 Live Deployment Sequencing** 
+  
+| **Order** | **Bot** | **Go-live condition** | **Scaling condition** | 
+| --- | --- | --- | --- | 
+| **1st** | SuperTrend v2.2 (with CAB watchdog attached) | Pass Phase 2 + failover tested manually | 30 live trades with positive expectancy | 
+| **2nd** | CAB Watcher (upgraded SI-gated) | Pass Phase 2 + attached to ST positions | Average closed R > 0.8 over 20 trades | 
+| **3rd** | Ghost Grid Reversion (grid watcher rebuilt) | Pass Phase 2 + grid stop fires < 20% grids | 50+ grids with positive average grid P&L | 
+  
+# **9. Development Timeline** 
+  
+| **Phase** | **Duration** | **Deliverable** | **Gate to Next Phase** | 
+| --- | --- | --- | --- | 
+| **Phase 1** | 1 week | All three bots enriched with cross-intelligence. MQL5 watchdog on SuperTrend. Grid watcher rebuilt. SI score in CAB. | All enrichments running on demo without crashes | 
+| **Phase 2** | 2 weeks minimum | Individual conviction data. Each bot passes its own criteria table (Section 5). Minimum 30 trades per bot. | All three bots pass Phase 2 conviction gate | 
+| **Phase 3** | 1 week | Cross-validation. Regime complementarity confirmed in practice. Portfolio drawdown lower than individual bots. CPU baseline measured. | All four Phase 3 decision gates cleared | 
+| **Phase 4** | 2–3 weeks build + 2 weeks demo | Unified single-process architecture. One MT5 connection. One regime classifier. H4 breakout layer. Single MQL5 EA. | Unified bot matches or exceeds combined individual performance | 
+| **Live** | 2 weeks micro-lot per bot | Sequential live deployment: SuperTrend first, CAB second, Ghost Grid third. Micro-lot sizing throughout initial live period. | Positive expectancy confirmed on live execution costs | 
+  
+*Total estimated time from Phase 1 start to unified live deployment: 10–12 weeks assuming all conviction gates are passed on first attempt. Add 1–2 weeks per failed gate.* 
+  
+**END OF DOCUMENT** 
+  
+Prepared: April 2026 | Version 1.0 | Page of 

@@ -612,6 +612,11 @@ def send_order(order_type, sl, tp, magic, comment,
             f"price={result.price} sl={round(sl,3)} tp={round(oob_tp,3)} [OOB] "
             f"lat={round(latency,1)}ms"
         )
+        try:
+            from data.trade_ledger import set_initial_risk
+            set_initial_risk(result.order, abs(result.price - sl))
+        except ImportError:
+            pass
         # ── Unified Trade Ledger: GHOST ENTRY ────────────────────────────
         if write_trade_event:
             write_trade_event(

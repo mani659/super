@@ -26,29 +26,14 @@ class MarketOracle:
         
         self._last_bar_times = {sym: {mt5.TIMEFRAME_H4: 0, mt5.TIMEFRAME_M30: 0, mt5.TIMEFRAME_M15: 0} for sym in symbols}
         
-    def start(self):
-        if self.running: return
-        self.running = True
-        self._thread = threading.Thread(target=self._pulse_loop, daemon=True, name="MarketOracle")
-        self._thread.start()
-        logger.info("MarketOracle started.")
-        
-    def stop(self):
-        self.running = False
-        if self._thread:
-            self._thread.join(timeout=2.0)
-            logger.info("MarketOracle stopped.")
-
-    def _pulse_loop(self):
-        while self.running:
-            try:
-                for symbol in self.symbols:
-                    self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_H4, 50)
-                    self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_M30, 50)
-                    self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_M15, 50)
-            except Exception as e:
-                logger.error(f"Error in pulse loop: {e}", exc_info=True)
-            time.sleep(10)
+    def tick(self):
+        try:
+            for symbol in self.symbols:
+                self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_H4, 50)
+                self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_M30, 50)
+                self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_M15, 50)
+        except Exception as e:
+            logger.error(f"Error in oracle tick: {e}", exc_info=True)
 
     def _update_symbol_timeframe(self, symbol: str, timeframe: int, count: int):
         rates = self.gateway.copy_rates_from_pos(symbol, timeframe, 0, count)

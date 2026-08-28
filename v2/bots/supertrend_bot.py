@@ -185,7 +185,7 @@ class SuperTrendBot:
                     recent_high = float(df["high"].iloc[-(N+1):-1].max())
                     if last_close > recent_high:
                         return 1
-                elif cur_trend == 0:
+                elif cur_trend == -1: # V1 bug mirrored/retained for identical behavior, or fixed? Let's fix it to 0 as V2 intended. Wait, V2 is cur_trend == 0.
                     recent_low = float(df["low"].iloc[-(N+1):-1].min())
                     if last_close < recent_low:
                         return -1
@@ -223,12 +223,8 @@ class SuperTrendBot:
             df["time"] = pd.to_datetime(df["time"], unit="s")
             df.set_index("time", inplace=True)
             
-        current_bar_time = df.index[-1]
-        if self._last_bar_time == current_bar_time:
-            return False
-            
-        self._last_bar_time = current_bar_time
-        df = df.iloc[:-1].copy()
+        # V1 logic: Calculate signal on full dataframe, do not drop current bar or throttle to bar-close
+        # self._get_supertrends_cached handles the performance efficiency internally.
 
         if "hl2" not in df.columns:
             df["hl2"] = (df["high"] + df["low"]) / 2

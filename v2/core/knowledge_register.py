@@ -10,7 +10,7 @@ import logging
 logger = logging.getLogger("KnowledgeRegister")
 
 # Raw Logging Mode: Bypasses all risk filters and invalidations to allow edge validation
-RAW_LOGGING_MODE = True
+RAW_LOGGING_MODE = False
 
 class KnowledgeRegister:
     """

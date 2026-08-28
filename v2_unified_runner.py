@@ -132,7 +132,6 @@ def main():
             )
             cab_bots.append(CABBot(cab_cfg, gateway, router, kr))
 
-    oracle.start()
     logger.info("All modules initialized. Entering deterministic tick loop.")
 
     # 3. Deterministic Tick Loop
@@ -157,8 +156,8 @@ def main():
             if current_dd >= max_dd_pct:
                 logger.warning(f"CIRCUIT BREAKER: drawdown {current_dd:.2f}% >= {max_dd_pct:.1f}% — entries blocked")
             
-            # Phase A: Oracle updates the KnowledgeRegister
-            # Oracle updates KR autonomously via its own background thread
+            # Phase A: Oracle updates the KnowledgeRegister synchronously
+            oracle.tick()
 
             # Phase B: Strategy Generation
             # SuperTrend (needs M30 data)

@@ -25,6 +25,21 @@ _LEDGER_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)))
 _LEDGER_PATH = os.path.join(_LEDGER_DIR, "trade_ledger.csv")
 _LOCK        = threading.Lock()
 
+# Global initial risk cache for R-multiple calculations on trailing SL bots
+_INITIAL_RISK_CACHE = {}
+
+def set_initial_risk(ticket: int, risk_dist: float):
+    with _LOCK:
+        _INITIAL_RISK_CACHE[ticket] = risk_dist
+
+def get_initial_risk(ticket: int) -> float:
+    with _LOCK:
+        return _INITIAL_RISK_CACHE.get(ticket)
+
+def clear_initial_risk(ticket: int):
+    with _LOCK:
+        _INITIAL_RISK_CACHE.pop(ticket, None)
+
 _COLUMNS = [
     "timestamp",
     "bot",              # ST / CAB / GHOST

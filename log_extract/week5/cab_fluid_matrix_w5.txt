@@ -1,0 +1,6 @@
+CAB fluid matrix fires — Week 5 (from logs/cab_watcher.log):
+  REAPER fires:    0
+  PROTECTOR fires: 0
+  HARVESTER fires: 0
+  OSI fires:       0
+

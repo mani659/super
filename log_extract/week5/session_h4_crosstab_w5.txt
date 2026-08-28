@@ -1,0 +1,100 @@
+
+=======================================================
+  Week 5 — magic 202 fills: 17
+=======================================================
+
+--- Session breakdown ---
+session
+ASIAN    17
+Name: count, dtype: int64
+
+--- Session × H4 direction fill counts ---
+h4_dir   DOWN  UP
+session          
+ASIAN       6  11
+
+--- ATR quartiles ---
+atr_q
+Q1_low     5
+Q2         4
+Q3         4
+Q4_high    4
+Name: count, dtype: int64
+  ATR mean:   1.5955
+  ATR median: 1.2294
+
+--- ADX buckets (dead zone check) ---
+adx_bucket
+<20      17
+20-25     0
+25-30     0
+30-35     0
+35-40     0
+>40       0
+Name: count, dtype: int64
+
+--- Conviction buckets ---
+conv_bucket
+<20      1
+20-30    4
+30-40    3
+40-50    6
+50-60    3
+>60      0
+Name: count, dtype: int64
+
+--- FILL_NO_SL count ---
+  0 naked fills (target: 0)
+
+=======================================================
+  Week 4+5 combined — magic 202 fills: 85
+=======================================================
+
+--- Session breakdown ---
+session
+ASIAN         49
+NY_CLOSE      19
+LONDON        11
+NY_OVERLAP     6
+Name: count, dtype: int64
+
+--- Session × H4 direction fill counts ---
+h4_dir      DOWN  UP
+session             
+ASIAN         22  27
+LONDON         0  11
+NY_CLOSE       0  19
+NY_OVERLAP     6   0
+
+--- ATR quartiles ---
+atr_q
+Q1_low     22
+Q2         21
+Q3         21
+Q4_high    21
+Name: count, dtype: int64
+  ATR mean:   1.5983
+  ATR median: 1.4164
+
+--- ADX buckets (dead zone check) ---
+adx_bucket
+<20      50
+20-25    25
+25-30     3
+30-35     4
+35-40     3
+>40       0
+Name: count, dtype: int64
+
+--- Conviction buckets ---
+conv_bucket
+<20       1
+20-30    23
+30-40    19
+40-50    27
+50-60    15
+>60       0
+Name: count, dtype: int64
+
+--- FILL_NO_SL count ---
+  0 naked fills (target: 0)

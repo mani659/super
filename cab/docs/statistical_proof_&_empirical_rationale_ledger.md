@@ -76,3 +76,41 @@ This document establishes the empirical justification for the architectural pivo
     │     (Magic: 9995551)  │   │    (Magic: 9995552)   │   │    (Magic: 9995553)   │
     │   Mean-Reversion Snap │   │   Trend-Following Dip │   │  Range-Bound Scaling  │
     └───────────────────────┘   └───────────────────────┘   └───────────────────────┘
+
+---
+
+## Empirical Audit: Week 1 Baseline Performance (2026-08-16 to 2026-08-22)
+
+### 1. Macro Telemetry Summary
+- **Total Net Profit:** +$639.79
+- **Gross Profit:** +$3,643.95 | **Gross Loss:** -$3,004.16
+- **Profit Factor:** 1.21
+- **Expected Payoff:** +$23.70 / trade
+- **Max Balance Drawdown:** $2,150.70 (2.44%)
+- **Total Trades Executed:** 27
+- **Win Rate:** 14.81% (4 Wins / 23 Losses)
+- **Average Win vs. Average Loss:** $910.99 vs. -$130.62 (7.0:1 Positive Asymmetry)
+- **Long Performance:** 13 Trades | 30.77% WR (4 Wins / 9 Losses)
+- **Short Performance:** 14 Trades | 0.00% WR (0 Wins / 14 Losses)
+
+---
+
+### 2. Regime Vector Breakdown
+
+| Regime Tier | Executed Volume | Net PnL | Win / Loss | Primary Drivers & Key Findings |
+| :--- | :--- | :--- | :--- | :--- |
+| **Continuation (ADX 30–60)** | 6 Market Orders, 4 Pending Traps | **+$2,037.86** | 1 W / 5 L | Carried portfolio profitability. BTCUSDm trend continuation winner extracted **+$2,991.96**. H1 Invalidation clamped 5 losses between -$93 and -$255. |
+| **Inversion (ADX > 60)** | 6 Closed (3 Floating) | **-$878.84** | 1 W / 5 L | Suffered from directional asymmetry. Counter-trend exhaustion signals repeatedly fought macro-bull momentum without a trend bias filter. |
+| **Grid (ADX < 30)** | 14 Positions across 3 Baskets | **-$1,146.23** | 1 Target / 2 Kills | USOILm closed at dynamic VWAP target (+$5.63). ETHUSDm (8 layers, -$1,121.11) and EURGBPm (5 layers, -$30.75) liquidated via ADX > 35 kill switch. |
+
+---
+
+### 3. Empirical Root Cause Analysis & v2.1 Architectural Fixes
+
+#### A. Directional Asymmetry on Short Inversions (0.00% WR)
+- **Root Cause:** In parabolic trends, ADX stays pinned above 60 while H4 candles continue breaking higher. The engine fired sell signals purely on exhaustion wicks without checking higher-timeframe trend structure.
+- **Applied Fix (v2.1):** Enforced H4 50 EMA macro bias filter. Shorts are hard-blocked if `Price > EMA50`.
+
+#### B. Rapid Intrabar Grid Stacking on ETHUSDm (8 Layers in 35 Minutes)
+- **Root Cause:** H4 ADX smoothing ($14 \times 4\text{h} = 56\text{ hours}$) lagged behind sudden 35-minute intrabar vertical moves. Linear ATR step spacing allowed the grid to stack 8 layers before ADX mathematically crossed 35.
+- **Applied Fix (v2.1):** 30-minute Adverse Velocity Pacing, Geometric Step Expansion, and a strict 5-layer cap.

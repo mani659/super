@@ -12,7 +12,7 @@ from v2.execution.mt5_gateway import MT5Gateway
 from v2.execution.order_router import OrderRouter
 from v2.bots.ghost_cache import GhostCache, N_LAYERS_DEFAULT
 
-logger = logging.getLogger("GhostBotV2")
+logger = logging.getLogger("GhostSniperBotV2")
 
 GHOST_MAX_LEGS = 4  # Non-negotiable hard cap — Architecture Principle #7
 
@@ -239,7 +239,7 @@ class GhostBot:
                 for sig in signals_to_fire:
                     ts = TradeSignal(
                         symbol=self.config.symbol,
-                        bot_name="GhostV2",
+                        bot_name="GhostSniperV2",
                         magic_number=sig["magic"],
                         order_type=sig["type"],
                         sl_price=sig["sl"]
@@ -255,7 +255,7 @@ class GhostBot:
                                 ticket=999999 + sig["magic"],
                                 symbol=self.config.symbol,
                                 direction=1 if sig["type"] == 0 else -1,
-                                bot_system="GhostV2",
+                                bot_system="GhostSniperV2",
                                 setup_type=sig["setup"],
                                 fill_price=sig["sl"], # Rough virtual approximation for shadow leg
                                 timestamp=time.time(),
@@ -337,7 +337,7 @@ class GhostBot:
                                 ticket=res.order,
                                 symbol=self.config.symbol,
                                 direction=1 if sig["type"] == mt5.ORDER_TYPE_BUY else -1,
-                                bot_system="GhostV2",
+                                bot_system="GhostSniperV2",
                                 setup_type=sig["setup"],
                                 fill_price=actual_fill_price,
                                 initial_sl=sig["sl"],
@@ -377,7 +377,7 @@ class GhostBot:
                     fill_price = tick.bid if order_type == mt5.ORDER_TYPE_SELL else tick.ask
                     ts = TradeSignal(
                         symbol=self.config.symbol,
-                        bot_name="GhostV2",
+                        bot_name="GhostSniperV2",
                         magic_number=204, # Magic Ghost Cache
                         order_type=order_type,
                         sl_price=gc_signal['sl']
@@ -434,7 +434,7 @@ class GhostBot:
                                 ticket=res.order,
                                 symbol=self.config.symbol,
                                 direction=1 if order_type == mt5.ORDER_TYPE_BUY else -1,
-                                bot_system="GhostV2",
+                                bot_system="GhostSniperV2",
                                 setup_type="CACHE",
                                 fill_price=actual_fill_price,
                                 initial_sl=gc_signal["sl"],

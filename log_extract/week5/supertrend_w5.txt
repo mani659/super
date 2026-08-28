@@ -1,0 +1,11 @@
+SuperTrend performance (from MT5 HTML):
+Total entries: 252
+  Count:  84
+  Mean P&L: $3.30
+  Win%:   52.4%
+  Mean R: DATA MISSING (R not logged in HTML)
+
+SuperTrend XAUUSDm (magic 301890):
+  Fills: 21
+  Mean P&L: $23.90
+  Win%:   85.7%

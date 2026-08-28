@@ -22,7 +22,7 @@ class OrderRouter:
         self.assumed_risk_per_trade_pct = 1.0 
         
         # Raw Logging Mode: Bypasses all risk filters to allow edge validation
-        self.raw_logging_mode = True
+        self.raw_logging_mode = False
 
     def route_signal(self, signal: TradeSignal, current_drawdown_pct: float, max_drawdown_pct: float) -> bool:
         """

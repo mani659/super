@@ -1159,11 +1159,19 @@ def main():
                 log_session_event("unified", f"THREAD_DEAD_{','.join(dead)}")
                 # Log and continue — do NOT stop the runner
             else:
+                # Check MT5 connection health and attempt reconnect if IPC dropped
+                gateway.reconnect_if_needed(
+                    path=account_cfg.get("mt5_path"),
+                    login=account_cfg["login"],
+                    password=account_cfg["password"],
+                    server=account_cfg["server"]
+                )
+                
                 acc = gateway.account_info()
                 eq_str = f" | Equity={acc.equity:.2f} P&L={acc.profit:.2f}" if acc else ""
                 logger.warning(f"Heartbeat OK | {len(alive)} threads alive{eq_str}")
                 log_session_event("unified", "EQUITY_HEARTBEAT",
-                                  r_multiple=round(acc.profit / max(acc.balance, 1), 4))
+                                  r_multiple=round(acc.profit / max(acc.balance, 1), 4) if acc else 0.0)
                 if acc and write_equity_snapshot:
                     pos_count = len(gateway.positions_get() or [])
                     write_equity_snapshot(acc.equity, acc.balance, acc.profit, pos_count)

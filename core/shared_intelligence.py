@@ -48,8 +48,8 @@ class MarketPulseEngine:
         while self.running:
             try:
                 for symbol in self.symbols:
-                    self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_H4, 50)
-                    self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_M15, 50)
+                    self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_H4, 150)
+                    self._update_symbol_timeframe(symbol, mt5.TIMEFRAME_M15, 150)
             except Exception as e:
                 logger.error(f"Error in pulse loop: {e}", exc_info=True)
             
@@ -62,11 +62,6 @@ class MarketPulseEngine:
             return
         
         current_bar_time = int(rates[-1]['time'])
-        
-        if current_bar_time <= self._last_bar_times[symbol][timeframe]:
-            return # Already processed this bar
-            
-        self._last_bar_times[symbol][timeframe] = current_bar_time
         df = pd.DataFrame(rates)
         
         # Calculate Facts
@@ -142,6 +137,7 @@ class MarketPulseEngine:
             current_spread=current_spread,
             normal_spread=normal_spread
         )
+        logger.info(f"MarketPulseEngine published {symbol} {tf_str} state")
 
     def _percentile_rank(self, series: pd.Series, value: float) -> int:
         arr = series.dropna().values

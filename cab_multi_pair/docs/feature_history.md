@@ -61,3 +61,23 @@
 * **ADR-001 (Zero-Division Shields):** Every math utility (`calculate_lot`, `realized_r`) must feature hardcoded fallbacks to prevent runtime `ZeroDivisionError` crashes during illiquid market gaps.
 * **ADR-002 (Offline Health Diagnostics):** Any structural or analytics code change must pass `python test_health.py` with zero errors before being deployed to a live environment.
 * **ADR-003 (The Incubation Mandate):** Code logic must remain locked during incubation phases (50–100 trades). Strategy tweaks based on short-term winning/losing streaks are strictly prohibited until statistically validated via `ledger.csv`.
+
+---
+
+## 🔬 Week 2 Empirical Observations (Pending Validation)
+*Status: Observed in live forward-testing (Week 2). Code remains locked pending Week 3 validation.*
+
+**1. The Directional Disparity:**
+*   **Observation:** Long positions demonstrated a heavy statistical edge (64.5% win rate), while Short positions dragged system performance (33.3% win rate).
+*   **Hypothesis:** The macro environment may be heavily skewed, or the `H4_MACRO_SELL` inversion logic requires a stricter structural confirmation than the buy side.
+
+**2. Asset Friction on GBP Pairs:**
+*   **Observation:** High-volatility pairs (BTCUSDm, XAUUSDm) thrived under the dynamic trailing lock, capturing bulk profits. However, traditional GBP pairs (GBPUSDm, EURGBPm) accounted for the heaviest systemic bleed (-$378 combined).
+*   **Hypothesis:** The current `BE_GATE_R` or H4 entry parameters may be incompatible with the intraday chop characteristics of the British Pound in the current regime.
+
+**3. The ADX Momentum Bands:**
+*   **Observation:** Deep-dive into `cab_performance_ledger` revealed that ADX averages between winning (36.2) and losing (35.4) trades are identical. However, the extremes hold the edge:
+    *   **ADX > 50:** Highly profitable (+17.75 R).
+    *   **ADX < 20:** A low-volatility trap (18.1% win rate, -3.16 R).
+    *   **ADX 30-50:** The deceptive "Chop Zone" (-10.27 R).
+*   **Action Plan:** Do not implement filters yet. Monitor Week 3 to see if these exact bands persist.

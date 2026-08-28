@@ -108,7 +108,8 @@ import time
 #  CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-N_LAYERS_DEFAULT      = 3    # Start here. Tune from data after 30+ fills.
+# V1 Week 6 configuration: Lowered to 2 to increase fire rate after Week 5 zero fires
+N_LAYERS_DEFAULT      = 2    # Start here. Tune from data after 30+ fills.
                              # n=2: fires more often, less exhaustion evidence
                              # n=3: balanced — start here
                              # n=4: fires rarely, very high conviction required

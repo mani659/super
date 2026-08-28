@@ -226,3 +226,19 @@ def _close_position(pos, reason: str, magic_number: int) -> bool:
         ret = res.retcode if res else "NoResponse"
         logging.getLogger().error(f"Failed to close #{pos.ticket} [{pos.symbol}]: Retcode {ret}")
     return False
+
+def get_ema(symbol: str, timeframe: int, period: int = 50) -> float:
+    """
+    Standard EMA calculation.
+    """
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, period * 2)
+    if rates is None or len(rates) < period:
+        return 0.0
+    
+    df = pd.DataFrame(rates)
+    ema_series = df['close'].ewm(span=period, adjust=False).mean()
+    ema_val = ema_series.iloc[-1]
+    
+    if ema_val is None or (isinstance(ema_val, float) and math.isnan(ema_val)):
+        return 0.0
+    return float(ema_val)

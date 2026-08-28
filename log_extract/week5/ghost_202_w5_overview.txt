@@ -1,0 +1,25 @@
+Week 5 total FILL events:        17
+Week 5 magic 202 FILL events:    17
+Week 5 magic 201 FILL events:    0
+Week 5 magic 204 FILL events:    0
+
+=== 202 side distribution (Week 5) ===
+side
+SELL    17
+Name: count, dtype: int64
+
+=== Week 5 ARMED events: 19 ===
+Probe direction breakdown:
+comment
+UP_PROBE    19
+Name: count, dtype: int64
+
+H4 direction at arm breakdown:
+h4_direction_at_arm
+UP      14
+DOWN     5
+Name: count, dtype: int64
+
+DOWN_PROBE into H4_UP: 0 of 19 total ARMED
+
+=== F6 gate fires (GHOST_ARM_BLOCKED_ST_LONG): check unified_runner.log ===

@@ -48,8 +48,11 @@ def execute_entries() -> None:
 
         # Data-backed filter: Block entries in RISK_OFF + COMPRESSION_LOW
         intel = get_entry_intelligence(sym)
-        if intel.get("Macro_Risk_Sentiment") == "RISK_OFF" and intel.get("H1_ATR_State") == "COMPRESSION_LOW":
-            logging.info(f"FILTERED: {sym} signal blocked due to RISK_OFF + COMPRESSION_LOW.")
+        atr_state = intel.get("H1_ATR_State", "UNKNOWN")
+        risk_sentiment = intel.get("Macro_Risk_Sentiment", "UNKNOWN")
+        
+        if risk_sentiment == "RISK_OFF" and atr_state == "COMPRESSION_LOW":
+            logging.info(f"FILTERED: {sym} [{signal}] trade blocked due to RISK_OFF + COMPRESSION_LOW.")
             continue
 
         pair_conf = config.PAIRS.get(sym, {"RISK_PERCENT": 1.0, "ATR_MULT_SL": 2.5})

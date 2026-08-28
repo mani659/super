@@ -12,7 +12,8 @@ from shared_utils import (
     check_h4_inversion,
     check_exhaustion_filter,
     check_smc_confluence,
-    _close_position
+    _close_position,
+    get_ema
 )
 
 # Magic Number hardcoded for the Inversion Vector (ADX > 60)
@@ -132,8 +133,9 @@ def manage_inversion_positions():
                 if res and res.retcode == mt5.TRADE_RETCODE_DONE:
                     logger.info(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] ELASTIC TRAIL updated to {trail_level:.5f}")
         
-        # 5. Active H1 Structural Invalidation (Losing Trades ONLY)
-        if pos.profit < 0:
+        # 5. Active H1 Structural Invalidation (Hit & Run for ADX > 60)
+        # Gate removed: We MUST exit on structural failure even if in profit (MFE protection)
+        if True:
             rates = mt5.copy_rates_from_pos(pos.symbol, mt5.TIMEFRAME_H1, 1, 4)
             if rates is not None and len(rates) >= 4:
                 df = pd.DataFrame(rates)
@@ -200,6 +202,19 @@ def execute_inversion_entries():
         # 1. Base Signal Gate
         if not signal: 
             continue
+
+        # --- NEW H4 MACRO EMA BIAS FILTER ---
+        # Only trade IN THE DIRECTION of the prevailing H4 macro trend
+        h4_ema = get_ema(sym, mt5.TIMEFRAME_H4, 50)
+        if h4_ema > 0:
+            current_close = rates_h4[0]['close']
+            if signal == "BULLISH" and current_close < h4_ema:
+                logger.debug(f"[{sym}] Filtered BULLISH Inversion: Price ({current_close}) < H4 EMA50 ({h4_ema})")
+                continue
+            if signal == "BEARISH" and current_close > h4_ema:
+                logger.debug(f"[{sym}] Filtered BEARISH Inversion: Price ({current_close}) > H4 EMA50 ({h4_ema})")
+                continue
+        # ------------------------------------
 
         # 2. ADX Momentum Exhaustion Gate (ADX > 60 ONLY, 24/5 allowed)
         adx, plus_di, minus_di = get_adx_directional(sym, mt5.TIMEFRAME_H4, 14)

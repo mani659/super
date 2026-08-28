@@ -108,10 +108,12 @@ import time
 #  CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-N_LAYERS_DEFAULT      = 3    # Start here. Tune from data after 30+ fills.
-                             # n=2: fires more often, less exhaustion evidence
-                             # n=3: balanced — start here
-                             # n=4: fires rarely, very high conviction required
+N_LAYERS_DEFAULT      = 2    # Lowered from 3: zero fires in Week 5 meets
+                             # pre-agreed trigger. n=2 fires at 2nd virtual
+                             # layer — more frequent, lower conviction than
+                             # n=3. Gate 2 decision (204 vs 202 avg_R)
+                             # requires 30+ fills; n=2 is the path to get
+                             # there. Do not raise back to 3 without data.
 
 SL_ATR_BUFFER         = 0.5  # SL = nth_layer_price ± 0.5×ATR (Slab C Grace)
                              # Wide enough to survive the liquidity sweep that

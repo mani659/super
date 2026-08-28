@@ -16,17 +16,30 @@ from shared_utils import (
 
 # Magic Number for Range Extraction Grid (ADX < 30)
 MAGIC_GRID = 9995553
-MAX_GRID_LAYERS = 5         # Maximum number of layers per symbol basket
+MAX_GRID_LAYERS = 5 # CAP AT 5 LAYERS
+BASE_GRID_MULTIPLIER = 1.0 # Static base lot
 
 last_h4_bar = {sym: None for sym in config.SYMBOLS}
 logger = logging.getLogger("STRAT_GRID")
 
-def _calculate_grid_addon_lot(sym_info, previous_lot: float) -> float:
-    """Calculates next layer lot size (1.5x previous lot, clamped and stepped)."""
-    raw_lot = previous_lot * 1.5
+def _calculate_grid_addon_lot(sym_info, layer_index: int) -> float:
+    """
+    Behavioral Scaling: Layers 1-2 (Feeler) = 1.0x, Layers 3-5 (Commitment) = 1.5x, 2.0x, 2.5x
+    """
+    base_lot = max(0.01, sym_info.volume_min)
+    if layer_index <= 2:
+        raw_lot = base_lot * 1.0
+    elif layer_index == 3:
+        raw_lot = base_lot * 1.5
+    elif layer_index == 4:
+        raw_lot = base_lot * 2.0
+    else:
+        raw_lot = base_lot * 2.5
+        
     step = sym_info.volume_step if sym_info.volume_step > 0 else 0.01
     lot_size = round(raw_lot / step) * step
     lot_size = max(sym_info.volume_min, min(lot_size, sym_info.volume_max))
+    
     if step == 0.01:
         return round(lot_size, 2)
     elif step == 0.1:
@@ -214,10 +227,13 @@ def execute_grid_entries():
                 current_price = tick.bid
                 adverse_move = current_price - worst_price  # Price rose above worst SELL price
 
-            # Check if adverse move is >= 1.0 * H4 ATR and basket not at max depth
-            if adverse_move >= (1.0 * h4_atr) and len(basket) < MAX_GRID_LAYERS:
-                previous_lot = worst_pos.volume
-                next_lot = _calculate_grid_addon_lot(sym_info, previous_lot)
+            # Check Geometric Spacing & Max Depth
+            # Layer 1 = 1 ATR, Layer 2 = 1.5 ATR, Layer 3 = 2.0 ATR...
+            current_layer = len(basket)
+            required_spacing = h4_atr * (1.0 + (current_layer - 1) * 0.5)
+            
+            if adverse_move >= required_spacing and current_layer < MAX_GRID_LAYERS:
+                next_lot = _calculate_grid_addon_lot(sym_info, current_layer + 1)
                 order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
                 comment = "GRID_ADDON"
 
@@ -248,6 +264,6 @@ def execute_grid_entries():
                         volume=rates_h4[0]['tick_volume'],
                         smc_confluence="GRID_LAYER"
                     )
-                    logger.info(f"[GRID ADDON ENTRY] Layer {len(basket)+1} on {sym} | Lot: {next_lot} (prev={previous_lot}) | Step: {adverse_move:.5f} (>= {h4_atr:.5f} ATR)")
+                    logger.info(f"[GRID ADDON ENTRY] Layer {current_layer+1} on {sym} | Lot: {next_lot} | Step: {adverse_move:.5f} (>= {required_spacing:.5f} ATR)")
                 else:
                     logger.error(f"[{sym}] Grid Addon Entry Failed. Retcode: {res.retcode if res else 'None'}")

@@ -4,6 +4,42 @@ This timeline maintains a strict historical record of all code modifications, bu
 
 ---
 
+## August 26, 2026 - Phase A Architecture Fix
+
+### V1 System
+- **MarketPulseEngine Data Publication Fix**
+  - **Change:** Modified `core/shared_intelligence.py` to remove the 4-hour staleness block (`current_bar_time <= self._last_bar_times`) and increased the MT5 bar fetch count from 50 to 150. Added live publication logging.
+  - **Impact:** Solved the critical bug where KR Layer 0 returned 98.5% `RANGING` due to NaN outputs from `atr14.rolling(50).mean()` on truncated 50-bar datasets. The pulse engine now correctly evaluates the current market state intra-bar (every 10s) instead of freezing for 4 hours after the H4 bar opens. Unblocks downstream KR consumers (CAB REAPER, ST SI score, Ghost regime gates).
+
+---
+
+## August 22, 2026 - Phase 2 Demo Testing (Week 6)
+
+### V1 System
+- **Ghost Cache N_LAYERS_DEFAULT Trigger**
+  - **Change:** Lowered `N_LAYERS_DEFAULT` from 3 to 2 in `ghost_super/ghost_cache.py`.
+  - **Impact:** Zero fires were recorded in Week 5. n=2 fires at the 2nd virtual layer (more frequent, lower conviction than n=3). This allows Gate 2 decision tracking (204 vs 202 avg_R) to accumulate the necessary 30+ fills.
+
+- **Ghost 204 Decouple Fix**
+  - **Change:** Removed `ghost_cache = None` from the 202 trigger block in `ghost_sniper.py`.
+  - **Impact:** GhostCache now persists after a 202 fire, allowing 204 to accumulate deeper virtual layers on the same probe. Cache only resets when `armed = None` (full probe cycle end).
+
+- **F6 Cross-Bot Gate Implementation**
+  - **Change:** Ghost `UP_PROBE` arming is now suppressed when Knowledge Register contains an active SuperTrend `LONG` thesis on XAUUSDm.
+  - **Impact:** Implemented in both `unified_runner.py` and `ghost_sniper.py`. Logs `GHOST_ARM_BLOCKED_ST_LONG`. This prevents Ghost 202 from firing structural short reversals into confirmed SuperTrend uptrends.
+
+- **CAB Watcher Log Path Fix**
+  - **Change:** `RotatingFileHandler` updated to write to `logs/cab_watcher.log` (was `cab_production_v16.3.log` in root). `extract_bot_logs.py` aligned to same path.
+  - **Impact:** H5 evaluation now unblocked, allowing accurate SL distance analysis to be performed from extracted CAB logs.
+
+- **CAB Premature Entry on Restart Fix**
+  - **Change:** State file persistence added in `logs/cab_state_{symbol}.json` with a startup grace period.
+  - **Impact:** Blocks cold-start re-fires and ensures clean tracking of fluid logic on restart.
+
+- **Ghost Grid 10016 SL Rejection Eliminated**
+  - **Change:** Phase 2 SL/TP anchor now computed from actual fill price (`result.price`), not pre-order tick price.
+  - **Impact:** Eliminates geometric mismatches that caused 10016 rejections and downstream naked trade kill-switch terminations.
+
 ## August 16, 2026 - Terminal Hijacking Prevention
 
 ### V1 & V2 Systems
