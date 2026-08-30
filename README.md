@@ -1,4 +1,5 @@
-# MT5 Algorithmic Trading Suite
+# 🤖 MT5 Algorithmic Trading Suite
+
 An enterprise-grade, multi-bot algorithmic trading matrix built for MetaTrader 5. This suite utilizes advanced Machine Learning (K-Means clustering), centralized cross-bot state management, and strict risk controls to navigate the Forex and CFD markets autonomously.
 
 > ⚠️ **DISCLAIMER**: This project is for **EDUCATIONAL PURPOSES ONLY**. Trading forex/CFDs involves substantial risk of loss and is not suitable for all investors. Past performance is not indicative of future results.
