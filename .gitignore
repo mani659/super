@@ -60,5 +60,20 @@ venv.bak/
 Thumbs.db
 desktop.ini
 
+# Runtime State & Logs
+logs/
+log_extract/
+reports/
+*.jsonl
+*.png
+
+# Bot runtime state
+cab/cab_watcher_heartbeat.txt
+cab/trade_context.json
+v2_knowledge_state.json
+v2_trade_ledger.jsonl
+logs/cab_state_*.json
+
 # Security
 config/config.json
+ghost_super/config.json

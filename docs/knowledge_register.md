@@ -36,11 +36,12 @@ HARD RULE: a global per-symbol (or correlated-bucket) combined risk ceiling acro
 
 LAYER 4 — Decision Advisory API
 Read interface each bot's existing entry-gate and watcher functions call into (implemented via the existing SharedState in-memory, RLock-protected pattern already proven in unified_runner.py — explicitly NOT a new CSV/file IPC mechanism):
-  - get_market_state(symbol, timeframe) -> Layer 0 facts
+  - get_market_state(symbol, timeframe) -> Layer 0 facts (returns None if stale)
   - get_entry_snapshot(ticket) -> Layer 1 immutable setup record
-  - get_invalidation_flags(symbol) -> Layer 2 active flags, if any
-  - get_portfolio_exposure(symbol_or_correlated_bucket) -> Layer 3 combined exposure figure
-  - get_micro_degradation(ticket) -> generalizes CAB's locked Change 1 Micro Degradation Vector (R-velocity / price efficiency decay) from CAB-only to a shared, bot-agnostic signal available to ST and Ghost Grid's watchers as well, since trade decay is not a CAB-exclusive question
+  - is_entry_invalidated(symbol, direction) -> (bool, reason) — Layer 2 hard block check
+  - check_portfolio_entry_allowed(symbol, direction, proposed_risk_pct, account_equity) -> (bool, reason) — Layer 3 combined exposure hard block
+  - get_micro_degradation(ticket, current_price, current_atr) -> dict {r_velocity, decay_factor, r_multiple} — generalizes CAB's locked Change 1 Micro Degradation Vector (R-velocity / price efficiency decay) from CAB-only to a shared, bot-agnostic signal available to ST and Ghost Grid's watchers as well, since trade decay is not a CAB-exclusive question
+  - unregister_trade_thesis(ticket) — removes thesis on trade closure
 
 RECONCILIATION WITH PREVIOUSLY LOCKED PER-BOT CHANGES:
   - CAB's locked Change 1 (Macro/Micro vector split): Macro Vector's regime component should ultimately read from Layer 0 instead of CAB's own get_market_regime() once the Register is live. Micro Degradation Vector generalizes into Layer 4's get_micro_degradation(), shared rather than CAB-exclusive.
@@ -52,8 +53,34 @@ ADDITIONAL SOURCES CONSIDERED AND EXPLICITLY DEFERRED (not locked in this pass):
   - Economic calendar / high-impact news blackout window shared across all bots — none of the three bots currently have this at all. Genuine gap, but new scope beyond what's been reviewed to date. Flag as a candidate for a future session, not part of this locked architecture.
   - Broker execution-quality feed (systemic slippage/spread-widening detection across all symbols simultaneously, e.g. rollover or news-driven) — partially covered by Layer 0b's per-symbol spread-quality flag; a full cross-symbol "something broker-side is wrong right now" meta-signal is a further extension, deferred.
 
+RAW_LOGGING_MODE (Operational Toggle)
+Both V1 and V2 KR implementations include a module-level constant RAW_LOGGING_MODE:
+  - V1 (core/knowledge_register.py): RAW_LOGGING_MODE = True  — bypasses Layer 2 (is_entry_invalidated) and Layer 3 (check_portfolio_entry_allowed) hard blocks. Trades flow freely. Used during demo/validation phase to collect raw telemetry without altering execution.
+  - V2 (v2/core/knowledge_register.py): RAW_LOGGING_MODE = False — hard blocks are ACTIVE. Layer 2 and Layer 3 enforce entry restrictions.
+  - When RAW_LOGGING_MODE = True: is_entry_invalidated() always returns (False, None); check_portfolio_entry_allowed() always returns (True, "Allowed").
+  - This toggle is the primary mechanism for going from data-collection mode to live-risk-enforcement mode.
+
+CORRELATION BUCKETS (Current Values)
+V1 buckets (core/knowledge_register.py):
+  - GOLD_SILVER: [XAUUSD, XAUUSDm, XAGUSD, XAGUSDm]  — 3.0% ceiling
+  - FX_USD_MAJORS: [EURUSD, EURUSDm, GBPUSD, GBPUSDm, USDJPY, USDJPYm]  — 4.0% ceiling
+V2 buckets (v2/core/knowledge_register.py) — NOTE: only "m" suffixed symbols:
+  - GOLD_SILVER: [XAUUSDm, XAGUSDm]  — 3.0% ceiling
+  - FX_USD_MAJORS: [EURUSDm, GBPUSDm, USDJPYm]  — 4.0% ceiling
+⚠ V2 bucket discrepancy: V2 omits base currency pairs (XAUUSD, XAGUSD, EURUSD, GBPUSD, USDJPY). If any bot trades non-"m" symbols via V2, those positions will not be tracked in the portfolio exposure ledger. Intentional if V2 only trades "m" accounts; needs confirmation.
+
 IMPLEMENTATION SEQUENCING (recommended, not mandated):
   1. Layer 0 first — highest leverage, retires the most duplicated/approximated code (3x Wilder ADX, 3x regime classifier, ST's flaw-C approximation), lowest risk since it's read-only fact distribution with no behavior change to any bot's decision logic yet.
   2. Layer 1 next — needed before Layer 2/3 can be meaningfully useful (invalidation and exposure checks are more valuable once entry context is actually preserved and shared).
   3. Layer 2 and Layer 3 together — both are the first layers introducing hard-block behavior, should be tested together in demo before any live consideration, since both change entry behavior (new blocks that didn't exist before).
   4. Layer 4 API — really exists implicitly as soon as Layers 0-3 exist; formalizing it as a clean interface is a code-organization step, not a new capability, can be done incrementally alongside 1-3 rather than strictly after.
+
+V2 IMPLEMENTATION STATUS (as of August 28, 2026)
+V2 KR (v2/core/knowledge_register.py) differs from V1 in several ways:
+  - MISSING from V2: is_entry_invalidated(), check_portfolio_entry_allowed(), get_micro_degradation() — Layer 2/3/4b not yet implemented in V2.
+  - ADDED in V2: Persistence layer (_save_state/_load_state via v2_knowledge_state.json), JSONL trade ledger (v2_trade_ledger.jsonl on unregister), get_active_theses(), get_bucket_for_symbol(), get_max_risk_for_bucket().
+  - V2 publish_market_state() accepts a MarketStateSnapshot object (not individual params like V1).
+  - V2 uses data_models.py for MarketStateSnapshot/TradeThesis (separate from V1's inline dataclasses).
+  - V2 RAW_LOGGING_MODE = False (hard blocks active) vs V1 = True (bypass active).
+  - V2 Layer 2 _invalidations dict exists but has no publish/query methods — invalidation bus not wired in V2 yet.
+  ⚠ V2 is NOT a mirror of V1 KR. It is a stripped-down version with persistence additions but missing the risk-enforcement layers. V2 bots currently operate without cross-bot invalidation or portfolio exposure checks.

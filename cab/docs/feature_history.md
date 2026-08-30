@@ -25,3 +25,26 @@
 
 ### Preserved
 - **Continuation Vector (`cab/strat_continuation.py`):** Maintained active dual-execution (Market Trend Entries + 24-Hour Pending Trap Stop Orders `CONT_TRAP_BUY / SELL`) without modification to continue multi-week data collection.
+
+## [v2.1.1] - 2026-08-30 (Enhanced Telemetry — Observation-Layer Only)
+
+### Added
+- **Enriched Trade Context (`cab/metrics.py`):**
+  - `register_trade_context()` now accepts and persists 6 additional fields: `adx`, `plus_di`, `minus_di`, `ema50`, `session`, `subtype`.
+  - All fields are optional with safe defaults (0.0 / "OTHER" / "UNKNOWN") so existing call sites do not break during transition.
+  - Stored to `trade_context.json` alongside existing risk/spread/slippage data.
+- **Grid Notional Risk (`cab/strat_grid.py`):**
+  - Grid base and addon entries now calculate a notional `risk_amount` using `H4_ATR × ATR_MULT_SL` as the theoretical SL distance.
+  - Previously hardcoded to `0.0`, making R-multiples for grid trades meaningless. Now computable for future analysis.
+- **Enriched Harvest Log (`cab/metrics.py`):**
+  - `harvest_closed_trades()` now includes `ADX`, `Sub` (subtype), and `Session` in the log line.
+  - Enables post-trade analysis by regime and entry type without manual correlation.
+- **Strategy Call Sites Updated:**
+  - `strat_inversion.py`: Passes `adx`, `plus_di`, `minus_di`, `ema50` (H4 EMA), `session` (hour-derived), `subtype` (INV_EXH_BUY / INV_EXH_SELL).
+  - `strat_continuation.py`: Passes `adx`, `plus_di`, `minus_di`, `session`, `subtype` (CONT_TREND_BUY / CONT_TREND_SELL / CONT_TRAP_BUY / CONT_TRAP_SELL).
+  - `strat_grid.py`: Passes `adx`, `session`, `subtype` (GRID_BASE / GRID_ADDON) with notional risk.
+
+### Zero Trading Logic Changes
+- No entry conditions, exit conditions, risk sizing, position management, or strategy behaviour was modified.
+- All changes are observation-layer only (logging, telemetry, context storage).
+- Consistent with ADR-003 (Incubation Mandate) and ADR-004 (Enhanced Logging permitted during incubation).

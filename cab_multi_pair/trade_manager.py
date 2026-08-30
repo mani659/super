@@ -5,6 +5,7 @@
 Monitors active positions, updates MFE/MAE state memory,
 handles trailing stops, executes protective trade closures,
 and records the Market Intelligencia snapshot upon entry.
+Enhanced with R-velocity timestamps and gate-hit tracking.
 ==================================================================
 """
 
@@ -44,7 +45,7 @@ def _close_position(pos, reason: str) -> bool:
         logging.info(f"KILLED #{pos.identifier} [{pos.symbol}] | Reason: {reason}")
         ledger.write_to_performance_ledger(pos, reason, exit_price)
         if pos.identifier in ledger.tracked_ids:
-            ledger.tracked_ids.remove(pos.identifier)
+            ledger.tracked_ids.discard(pos.identifier)
         return True
     return False
 
@@ -87,6 +88,7 @@ def manage_open_trades() -> None:
             continue
             
         current_price = tick.bid if is_buy else tick.ask
+        now_ts = time.time()
 
         # 1. Establish Risk Distance & Capture Entry Intelligencia Snapshot
         if pos_id not in ledger.entry_risk:
@@ -94,9 +96,9 @@ def manage_open_trades() -> None:
             if dist > 0: 
                 ledger.entry_risk[pos_id] = dist
                 
-                # --- NEW: TRIGGER INTELLIGENCIA SNAPSHOT ---
+                # --- TRIGGER ENHANCED INTELLIGENCIA SNAPSHOT ---
                 if pos_id not in ledger.entry_intelligence:
-                    ledger.entry_intelligence[pos_id] = get_entry_intelligence(pos.symbol)
+                    ledger.entry_intelligence[pos_id] = get_entry_intelligence(pos.symbol, direction="BUY" if is_buy else "SELL")
             else: 
                 continue
             
@@ -104,19 +106,31 @@ def manage_open_trades() -> None:
         price_move = (current_price - pos.price_open) if is_buy else (pos.price_open - current_price)
         current_r = price_move / risk_dist
 
-        # 2. Update MFE and MAE State Memory
-        if pos_id not in ledger.mfe_tracker: ledger.mfe_tracker[pos_id] = current_price
-        if pos_id not in ledger.mae_tracker: ledger.mae_tracker[pos_id] = current_price
+        # 2. Update MFE and MAE State Memory + timestamps
+        if pos_id not in ledger.mfe_tracker:
+            ledger.mfe_tracker[pos_id] = current_price
+            ledger.mfe_time[pos_id] = now_ts
+        if pos_id not in ledger.mae_tracker:
+            ledger.mae_tracker[pos_id] = current_price
+            ledger.mae_time[pos_id] = now_ts
         
         if is_buy:
-            if current_price > ledger.mfe_tracker[pos_id]: ledger.mfe_tracker[pos_id] = current_price
-            if current_price < ledger.mae_tracker[pos_id]: ledger.mae_tracker[pos_id] = current_price
+            if current_price > ledger.mfe_tracker[pos_id]:
+                ledger.mfe_tracker[pos_id] = current_price
+                ledger.mfe_time[pos_id] = now_ts
+            if current_price < ledger.mae_tracker[pos_id]:
+                ledger.mae_tracker[pos_id] = current_price
+                ledger.mae_time[pos_id] = now_ts
         else:
-            if current_price < ledger.mfe_tracker[pos_id]: ledger.mfe_tracker[pos_id] = current_price
-            if current_price > ledger.mae_tracker[pos_id]: ledger.mae_tracker[pos_id] = current_price
+            if current_price < ledger.mfe_tracker[pos_id]:
+                ledger.mfe_tracker[pos_id] = current_price
+                ledger.mfe_time[pos_id] = now_ts
+            if current_price > ledger.mae_tracker[pos_id]:
+                ledger.mae_tracker[pos_id] = current_price
+                ledger.mae_time[pos_id] = now_ts
 
         # 3. Protective Sentinel Checks
-        hours_open = (time.time() - pos.time) / 3600.0
+        hours_open = (now_ts - pos.time) / 3600.0
 
         h4_signal = check_h4_inversion(pos.symbol)
         if (is_buy and h4_signal == "BEARISH") or (not is_buy and h4_signal == "BULLISH"):
@@ -133,7 +147,7 @@ def manage_open_trades() -> None:
             _close_position(pos, "STAGNATION_DECAY")
             continue
 
-        # 4. Configured Trailing & Gate Execution
+        # 4. Configured Trailing & Gate Execution + gate-hit flags
         updated_best = ledger.mfe_tracker[pos_id]
         pair_conf = config.PAIRS.get(pos.symbol, {})
         be_gate_r = pair_conf.get("BE_GATE_R", 1.0)
@@ -141,6 +155,12 @@ def manage_open_trades() -> None:
         
         peak_move = (updated_best - pos.price_open) if is_buy else (pos.price_open - updated_best)
         peak_r = peak_move / risk_dist
+        
+        # Record gate hits (for statistical analysis of trailing effectiveness)
+        if peak_r >= be_gate_r:
+            ledger.be_hit[pos_id] = True
+        if peak_r >= lock_gate_r:
+            ledger.lock_hit[pos_id] = True
         
         target_sl = pos.sl
         if peak_r >= lock_gate_r:

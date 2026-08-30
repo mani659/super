@@ -286,6 +286,23 @@ def execute_inversion_entries():
             except Exception:
                 risk_amount = 0.0
 
+            # Session label from hour
+            try:
+                from datetime import datetime
+                h = datetime.utcfromtimestamp(tick.time).hour
+            except Exception:
+                h = 0
+            if 0 <= h < 7:
+                sess = "ASIAN"
+            elif 7 <= h < 12:
+                sess = "LONDON"
+            elif 12 <= h < 17:
+                sess = "LONDON_NY"
+            elif 17 <= h < 22:
+                sess = "NY"
+            else:
+                sess = "LATE_NY"
+
             register_trade_context(
                 ticket=res.order,
                 risk_amount=risk_amount,
@@ -293,7 +310,13 @@ def execute_inversion_entries():
                 slippage=slippage_pips,
                 exhaustion_state=exhaustion_state,
                 volume=tick_volume,
-                smc_confluence=smc_confluence
+                smc_confluence=smc_confluence,
+                adx=adx,
+                plus_di=plus_di,
+                minus_di=minus_di,
+                ema50=h4_ema,
+                session=sess,
+                subtype=comment
             )
             
             logger.info(f"[EXHAUSTION ENTRY] Executed {sym} | ADX: {adx:.1f} | Lot: {calc_volume} | Trigger: {comment}")

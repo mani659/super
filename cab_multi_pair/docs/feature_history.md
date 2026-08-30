@@ -22,9 +22,9 @@
 * **Mechanism:** An external batch script runs `main.py` inside an infinite loop that auto-restarts the script instantly if an unhandled crash or network drop occurs.
 * **Why It Works:** Guarantees 24/5 uptime without risking execution race conditions between Python and MetaTrader.
 
-### 5. Market Intelligencia Logging
-* **Mechanism:** Captures ADX trend strength, H1 ATR volatility states, active session tags, and Macro DXY/Risk proxies at the exact second a trade is initiated.
-* **Why It Works:** Builds a rich dataset to replace speculative guesswork with data-driven optimization in Phase 2.
+### 5. Market Intelligencia Logging (Enhanced – 30 Aug 2026)
+* **Mechanism:** Captures ADX trend strength, H1 ATR volatility states (absolute + % of price), active session tags, Macro DXY/Risk proxies, **EntrySpreadPoints**, **EntryATR**, **EntryATR_Pct**, **ActiveSameDirection**, **ActiveCorrelated**, **TimeToMFE_Hours**, **TimeToMAE_Hours**, **BE_Hit**, and **Lock_Hit** flags at the exact second a trade is initiated / managed.
+* **Why It Works:** Builds a rich dataset to replace speculative guesswork with data-driven optimization in Phase 2. The new fields specifically enable R-velocity analysis, true cost-of-spread measurement, trailing-gate effectiveness studies, and cluster-risk evaluation.
 
 ### 6. Pure Visual Dashboard Sentinel (`CAB_Engine_Dashboard.mq5`)
 * **Mechanism:** MQL5 script attached to a single chart that strictly reads `cab_heartbeat.txt` and displays a clean GUI (`✅ ONLINE` / `❌ OFFLINE`).
@@ -61,23 +61,38 @@
 * **ADR-001 (Zero-Division Shields):** Every math utility (`calculate_lot`, `realized_r`) must feature hardcoded fallbacks to prevent runtime `ZeroDivisionError` crashes during illiquid market gaps.
 * **ADR-002 (Offline Health Diagnostics):** Any structural or analytics code change must pass `python test_health.py` with zero errors before being deployed to a live environment.
 * **ADR-003 (The Incubation Mandate):** Code logic must remain locked during incubation phases (50–100 trades). Strategy tweaks based on short-term winning/losing streaks are strictly prohibited until statistically validated via `ledger.csv`.
+* **ADR-004 (Enhanced Logging – 30 Aug 2026):** Logging enhancements that do not alter trading decisions are permitted even during incubation, because richer data accelerates Phase 2 discovery without introducing look-ahead or curve-fitting risk.
 
 ---
 
-## 🔬 Week 2 Empirical Observations (Pending Validation)
-*Status: Observed in live forward-testing (Week 2). Code remains locked pending Week 3 validation.*
+## 🔧 Planned / Future Mechanisms
+
+### 1. Partial-Close at R-Target (`PARTIAL_R`)
+* **Status:** Config defined, not yet implemented.
+* **Mechanism:** `PARTIAL_R` is defined per pair in `config.py` (e.g., 1.5 R for forex, 2.0 R for crypto). When implemented, the trade manager will close a configurable percentage of the position once the running R-multiple reaches this threshold, securing partial profit while leaving the remainder to run.
+* **Why It's Deferred:** Requires a statistically validated R-threshold determined from MFE/MAE data collected during Week 4 enhanced logging. Premature implementation risks locking in sub-optimal partial-close levels. The `PARTIAL_R` values in `config.py` are placeholders pending that analysis.
+* **Dependency:** Week 4 `TimeToMFE_Hours` data will reveal the optimal R-level at which partial closes add the most value across pair types.
+
+---
+
+## 🔬 Week 2 / Week 3 Empirical Observations (Locked)
+
+**Status:** Observed in live forward-testing. Code remains locked pending further data accumulation with the new logging fields.
 
 **1. The Directional Disparity:**
-*   **Observation:** Long positions demonstrated a heavy statistical edge (64.5% win rate), while Short positions dragged system performance (33.3% win rate).
-*   **Hypothesis:** The macro environment may be heavily skewed, or the `H4_MACRO_SELL` inversion logic requires a stricter structural confirmation than the buy side.
+* Long positions demonstrated a heavy statistical edge (64.5% win rate in strong week), while Short positions dragged system performance (33.3% win rate overall).
+* Hypothesis: The macro environment may be heavily skewed, or the `H4_MACRO_SELL` inversion logic requires a stricter structural confirmation than the buy side.
 
 **2. Asset Friction on GBP Pairs:**
-*   **Observation:** High-volatility pairs (BTCUSDm, XAUUSDm) thrived under the dynamic trailing lock, capturing bulk profits. However, traditional GBP pairs (GBPUSDm, EURGBPm) accounted for the heaviest systemic bleed (-$378 combined).
-*   **Hypothesis:** The current `BE_GATE_R` or H4 entry parameters may be incompatible with the intraday chop characteristics of the British Pound in the current regime.
+* High-volatility pairs (BTCUSDm, XAUUSDm, USTECm) thrived under the dynamic trailing lock. Traditional GBP pairs (GBPUSDm, EURGBPm) accounted for the heaviest systemic bleed.
+* Hypothesis: Current `BE_GATE_R` or H4 entry parameters may be incompatible with the intraday chop characteristics of the British Pound in the current regime.
 
 **3. The ADX Momentum Bands:**
-*   **Observation:** Deep-dive into `cab_performance_ledger` revealed that ADX averages between winning (36.2) and losing (35.4) trades are identical. However, the extremes hold the edge:
-    *   **ADX > 50:** Highly profitable (+17.75 R).
-    *   **ADX < 20:** A low-volatility trap (18.1% win rate, -3.16 R).
-    *   **ADX 30-50:** The deceptive "Chop Zone" (-10.27 R).
-*   **Action Plan:** Do not implement filters yet. Monitor Week 3 to see if these exact bands persist.
+* ADX < 20 remains a consistent trap.
+* ADX 30–50 carried most of the positive expectancy in the strong week.
+* ADX > 50 was less reliable than previously believed once outliers were examined.
+
+**4. Week-over-Week Variance (Critical):**
+* W33 (17–21 Aug): 61.5% WR, +35.8 R (heavily outlier-driven by one USTECm +17.2 R and one BTC +10.8 R).
+* W34 (25–28 Aug): 38.1% WR, –2.5 R.
+* Conclusion: The 55–61% “breakthrough” was not a new baseline; the system reverts toward mid-30s / low-40s win rate when large outliers are absent.

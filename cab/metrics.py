@@ -38,15 +38,23 @@ def save_trade_context():
 # Load context memory on startup
 load_trade_context()
 
-def register_trade_context(ticket, risk_amount, spread, slippage, exhaustion_state, volume, smc_confluence):
-    """Stores entry diagnostics persistently."""
+def register_trade_context(ticket, risk_amount, spread, slippage, exhaustion_state, volume, smc_confluence,
+                            adx=0.0, plus_di=0.0, minus_di=0.0, ema50=0.0,
+                            session="OTHER", subtype="UNKNOWN"):
+    """Stores entry diagnostics persistently (enhanced with directional context)."""
     trade_context[ticket] = {
         'risk_amount': risk_amount,
         'spread': spread,
         'slippage': slippage,
         'exhaustion_state': exhaustion_state,
         'volume': int(volume),
-        'smc_confluence': smc_confluence
+        'smc_confluence': smc_confluence,
+        'adx': round(adx, 2),
+        'plus_di': round(plus_di, 2),
+        'minus_di': round(minus_di, 2),
+        'ema50': round(ema50, 5),
+        'session': session,
+        'subtype': subtype
     }
     save_trade_context()
 
@@ -146,10 +154,15 @@ def harvest_closed_trades(magic_number):
                 if decay_duration > 0:
                     decay_time = str(timedelta(seconds=decay_duration))
             
+            adx_val = ctx.get('adx', 0.0)
+            subtype_val = ctx.get('subtype', 'UNKNOWN')
+            session_val = ctx.get('session', 'OTHER')
+            
             logger.info(
                 f"[METRICS] HARVESTED | ID {ticket} | {deal.symbol} | Profit: ${profit:.2f} | R: {r_multiple_val:.2f}R | "
                 f"Exit: {exit_reason} | R-Saved: {r_saved} | MFE: ${mfe:.2f} ({mfe_capture:.1f}%) | "
-                f"MAE: ${mae:.2f} | H1-Decay: {decay_time} | Dur: {dur_str}"
+                f"MAE: ${mae:.2f} | H1-Decay: {decay_time} | Dur: {dur_str} | "
+                f"ADX: {adx_val:.1f} | Sub: {subtype_val} | Session: {session_val}"
             )
             harvested_tickets.add(ticket)
             save_trade_context()

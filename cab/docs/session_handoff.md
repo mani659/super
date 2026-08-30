@@ -1,8 +1,8 @@
 # Session Handoff Document: CAB Standalone (Single Pair)
 
-**Date of Handoff:** August 23, 2026
+**Date of Handoff:** August 30, 2026
 **Target Audience:** Incoming AI Models / Developers
-**Current Phase:** Week 2 Live Forward-Testing & Regime/Risk Hardening
+**Current Phase:** Observation Window (Week 3+) — Pure Data Collection, Enhanced Telemetry Active
 
 ---
 
@@ -28,7 +28,13 @@ To resolve this, the following architectural updates were applied:
 - **Bot Boundaries Mandate:** Do **NOT** apply V1's `max_lot_demo_cap` or global multi-bot constraints to this bot. It runs a standalone mathematical strategy with its own dynamic balance rules.
 - **The Incubation Mandate (ADR-003):** You are strictly prohibited from tweaking code parameters to fit short-term (1-week) variance. We require multiple weeks of uninterrupted telemetry before altering core math. 
 
-## 4. Immediate Next Steps for Incoming Model
-- Run the bot on the standalone terminal to collect Week 2's empirical data.
-- Monitor the newly deployed `CONT_TRAP_BUY` and `CONT_TRAP_SELL` logic in the W2 live environment to see if it captures asymmetric winners while minimizing H1 structural invalidation.
-- Avoid introducing arbitrary filters to the system; wait for the Week 2/3 performance audit before recommending code changes.
+## 4. Current Directives
+- **Observation Window (active):** No code changes, no parameter changes, no new filters. See `docs/observation_window_plan.md` for the formal measurement plan.
+- **Enhanced Telemetry (v2.1.1 deployed Aug 30):** Trade context now captures ADX, +DI, -DI, H4 EMA, session, and subtype at entry. Grid entries now have notional risk for R-multiple calculation. Harvest log enriched. Zero trading logic changes.
+- **Decision Gate:** At end of observation window (~Sep 12), evaluate whether Continuation winners justify Inversion + Grid drag.
+
+## 5. Immediate Next Steps for Incoming Model
+- Verify the bot is running and heartbeat is active on the standalone terminal.
+- Confirm `trade_context.json` is being written with the new v2.1.1 fields (adx, plus_di, minus_di, ema50, session, subtype) on the next closed trade.
+- Do NOT introduce arbitrary filters, parameter changes, or strategy modifications.
+- Log weekly observations in `docs/week2_performance_summary.md` (template) at end of each trading week.

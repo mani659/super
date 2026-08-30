@@ -1,8 +1,8 @@
 # Session Handoff Document: Super Bot (V1 / V2)
 
-**Date of Handoff:** August 23, 2026
+**Date of Handoff:** August 28, 2026
 **Target Audience:** Incoming AI Models / Developers
-**Current Phase:** Phase 2 Demo Testing — Week 7 (Parallel Execution Validation)
+**Current Phase:** Phase 2 Demo Testing — Week 6/7 Transition
 
 ---
 
@@ -22,6 +22,7 @@ During this session, we conducted a rigorous quantitative audit and alignment ph
 3. **Ghost Cache 204:** Tuned `N_LAYERS_DEFAULT = 2` (down from 3) in `ghost_cache.py` to match the W6 tightening.
 4. **Nomenclature Parity:** V2 bots were renamed precisely to match V1 (`GhostSniperBot`, `CABSuperBot`).
 5. **Cross-Bot F6 Gate:** We mathematically confirmed that both V1 and V2 correctly block Ghost `UP_PROBE` (a SHORT trade) when SuperTrend holds a LONG position, preventing internal conflict.
+6. **Week 5 Data Commit (Aug 28):** All W5 log extractions, V2 architecture updates, and W6 Trading Plans were successfully committed to `main` (commit `bad7954`).
 
 ## 3. Active Directives (Do Not Violate)
 - **Trading System Philosophy (Permanent Rule):** The `KnowledgeRegister` (in both V1 and V2) exists **strictly** to gather and serialize raw logging data for analysis. It must NEVER be used to arbitrarily block or restrict trades based on human liking. Any filters must be statistically informed.

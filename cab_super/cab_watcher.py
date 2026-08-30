@@ -881,7 +881,7 @@ def run_brain():
             return
 
     logging.info("-" * 60)
-    logging.info("  CAB WATCHER v16.3 - PRODUCTION BRAIN ONLINE")
+    logging.info("  CAB WATCHER v16.4-1 - PRODUCTION BRAIN ONLINE")
     # fix-cabsym: no longer single-symbol — manages every open magic=999555
     # position across whatever symbols cab_entry.py opened, discovered fresh
     # each cycle from positions_get(). SYMBOL now only matters as the Asian-

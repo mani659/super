@@ -3,8 +3,8 @@
 # Algo Trading — Development Tracker
 
 **Status:** Phase 2 Demo Testing — Week 6 (Statistical Gate Implementation)
-**Version:** v17
-**Last Updated:** Aug 22 2026
+**Version:** v18
+**Last Updated:** Aug 28 2026
 
 ## Completed Tasks
 
@@ -62,6 +62,23 @@
 - [x] Magic isolation breach detail logging.
 - [x] MQL5 EA ATR handle caching.
 - [x] SuperTrend si_partial_close_min lowered to 0.55.
+
+- [x] **Full V1 codebase audit completed (Aug 28 2026)**: Independent
+  audit by Buffy (Codebuff AI) covering unified_runner.py, all three
+  bot subsystems, shared infrastructure, and MQL5 failover EA.
+  Findings reviewed and filtered by Claude. V1-scope action items
+  applied this session. cab/, cab_multi_pair/, and V2 audit findings
+  deferred to post-Week 6 performance review session.
+
+- [x] **Dead code deleted (Aug 28 2026)**: core/risk_manager.py,
+  core/news_filter.py, and core/performance_monitor.py permanently
+  removed. All three were unreachable from any live bot thread and
+  superseded by existing architecture (circuit breaker, KR Layer 3,
+  extract_bot_logs.py workflow respectively).
+
+- [x] **CAB Watcher version string corrected (Aug 28 2026)**:
+  Log banner in cab_watcher.py run_brain() updated from "v16.3" to
+  "v16.4-1" to match the actual deployed version including OSI.
 
 ### Week 3 Performance Findings (Aug 1–8 2026)
 - [x] SuperTrend confirmed positive-expectancy: +$119.26, 73 trades, 
@@ -164,6 +181,11 @@
 - [ ] **Thread health**: grep "Heartbeat OK" logs/unified_runner.log | tail -3
   Expected: 5 threads alive.
 - [ ] **H8 equity**: Record Week 6 close equity.
+- [ ] **MarketPulseEngine publishing**: Check
+  `grep "MarketPulseEngine published XAUUSDm H4" logs/unified_runner.log | tail -3`
+  Expected: non-zero publish lines within 60 seconds of startup,
+  continuing at roughly 10-second intervals. If absent or stopped,
+  KR Layer 0 is dark and all bots are on hardcoded fallbacks.
 
 ### End-of-Week 6 evaluations (data-dependent)
 - [ ] **Ghost 202 session gate confirmation** (primary):
@@ -211,6 +233,46 @@
 - [ ] **Research/Discussion: Regime Disconnect (H2/H4 pending confirmation)**: Ghost Grid M15 probe arming and SuperTrend H4 regime reads disagreed during Week 3 — Gold classified as RANGING on M15 while making a 130-point H4 uptrend. Proposed fix: block DOWN_PROBE arming when H4 structural direction is UP, and UP_PROBE when H4 is DOWN. NOT implementable until H2 is confirmed from Week 4 h4_direction_at_arm data and H4 regime label accuracy is verified. Minimum evidence requirement: H2 confirmed at >30% DOWN_PROBE-into-H4-UP rate across Week 4 fills.
 - [ ] **Research/Discussion: SuperTrend Continuation Signals**: Evaluate the risk of bypassing the `INCUBATING -> CONFIRMED` state machine for mid-trend entries, which strips SI protections.
 - [ ] **Research/Discussion: Model Divergence vs. Exposure Limits**: Evaluate the workflow impact, pros, and cons of adding a statistical meta-model tie-breaker for conflicting positions (e.g., CAB sells on H4, SuperTrend buys on M15). Must reconcile with the current Knowledge Register design (Layers 2/3), which treats ST-vs-Ghost disagreement as legitimate and manages it via correlation-bucket exposure ceilings rather than a hard directional veto. Keep as an idea for detailed statistical discussion before considering any implementation.
+- [ ] **Ghost probe logic unification (Phase C refactor)**: The probe
+  arming/tracking/firing logic is duplicated between
+  ghost_super/ghost_sniper.py run_hunter() (standalone) and
+  unified_runner.py ghost_hunter_thread() (live). Any fix to one
+  must be manually replicated to the other — the 204 decouple fix
+  and ghost_cache = None divergence confirmed this is a real
+  maintenance hazard. Refactor target: extract shared probe class.
+  NOT touching during active data collection. Schedule for Phase C
+  or between Phase B and C when no gates are mid-implementation.
+
+- [ ] **MarketPulseEngine silent fallback monitoring (ongoing)**:
+  If MarketPulseEngine errors on any symbol, get_market_state()
+  returns None and all three bots silently fall back to hardcoded
+  regime/ADX/ATR defaults with no loud alert. Add a watchdog check
+  to the main thread heartbeat loop: if KR snapshot for XAUUSDm H4
+  is None or older than 15 minutes, log WARNING at ERROR level so
+  it surfaces in the heartbeat line. Low implementation cost, high
+  diagnostic value. Schedule alongside next agent coding session.
+
+- [ ] **204 fire bs/gates staleness (audit finding Aug 28 2026)**:
+  When GhostCache fires magic 204 during the probe tracking phase,
+  the brain state (bs) and gate evaluation (gates) passed to
+  send_order() are from the arming tick — potentially minutes stale.
+  Gate evaluation at the moment of 204 fire would be more accurate.
+  Deliberately skipped during active data collection (Week 6+) to
+  avoid altering 204 gate behavior mid-dataset. Address during Phase
+  C probe logic unification refactor.
+
+- [ ] **ghost_hunter_thread switches scope fragility (audit finding
+  Aug 28 2026)**: In unified_runner.py ghost_hunter_thread(), the
+  switches variable is assigned inside the `if armed is None:` block.
+  In the `else:` (tracking) branch, switches references the value
+  from the previous arming iteration. Practically harmless because
+  armed always initialises as None, but fragile by design. Fix by
+  moving load_switches() call to the top of the while loop so it
+  is re-read every tick regardless of armed state. Deliberately
+  skipped during active data collection. Address during Phase C
+  probe logic unification refactor alongside the bs/gates staleness
+  fix above.
+
 - [ ] **Architectural Fix for 10016 SL Rejections (RESOLVED — Aug 8 2026)**: Option 2 (Phase 2 Dynamic SL) implemented in `ghost_super/ghost_sniper.py` `send_order()`. SL/TP anchor in Phase 2 now computed from `result.price` (actual fill price) rather than pre-order tick price. Eliminates geometric mismatch that caused 10016 rejections and downstream naked trade kill-switch terminations. Single-Phase entry (Option 1) was rejected because it would cause missed entries on 10016 rejection of the bundled order — worse outcome on a strategy that fires at precise probe retraction moments.
 
 ## Deferred / Parked Items

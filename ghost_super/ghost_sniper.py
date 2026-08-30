@@ -59,9 +59,11 @@ import numpy as np
 import time
 import os
 import csv
+import json
 import logging
 import logging.handlers
 from datetime import datetime, date
+from pathlib import Path
 
 # fix-204wire: run_hunter() below references GhostCache / N_LAYERS_DEFAULT /
 # MAGIC_GHOST_CACHE but this file never imported them — a standalone
@@ -98,12 +100,21 @@ def _api():
 #  CONFIGURATION
 # ─────────────────────────────────────────────
 SYMBOL             = "XAUUSDm"
-MT5_PATH           = r"C:\Program Files\MetaTrader 5 EXNESS - Copy\terminal64.exe"
 LOT_SIZE           = 0.01
 
-ACCOUNT            = 260714012
-PASSWORD           = "Sal_4659$"
-SERVER             = "Exness-MT5Trial15"
+# Load MT5 credentials from local config file (gitignored).
+# Falls back to hardcoded defaults if config.json is missing.
+_GHOST_CFG = Path(__file__).parent / "config.json"
+if _GHOST_CFG.exists():
+    with open(_GHOST_CFG) as _f:
+        _cfg = json.load(_f)
+else:
+    _cfg = {}
+
+MT5_PATH           = _cfg.get("mt5_path", r"C:\Program Files\MetaTrader 5 EXNESS - Copy\terminal64.exe")
+ACCOUNT            = _cfg.get("login", 260714012)
+PASSWORD           = _cfg.get("password", "Sal_4659$")
+SERVER             = _cfg.get("server", "Exness-MT5Trial15")
 
 MAGIC_SCALP        = 201
 MAGIC_REVERSAL     = 202

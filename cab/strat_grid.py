@@ -198,14 +198,46 @@ def execute_grid_entries():
             last_h4_bar[sym] = current_h4_time
             res = mt5.order_send(req)
             if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                # Calculate notional risk for R-multiple tracking
+                try:
+                    point_value = sym_info.trade_tick_value / (sym_info.trade_tick_size / sym_info.point)
+                    sl_dist_notional = h4_atr * config.ATR_MULT_SL
+                    sl_points = sl_dist_notional / sym_info.point
+                    risk_amount = sl_points * point_value * float(base_lot)
+                except Exception:
+                    risk_amount = 0.0
+                
+                # Session label
+                try:
+                    from datetime import datetime
+                    h = datetime.utcfromtimestamp(tick.time).hour
+                except Exception:
+                    h = 0
+                if 0 <= h < 7:
+                    sess = "ASIAN"
+                elif 7 <= h < 12:
+                    sess = "LONDON"
+                elif 12 <= h < 17:
+                    sess = "LONDON_NY"
+                elif 17 <= h < 22:
+                    sess = "NY"
+                else:
+                    sess = "LATE_NY"
+
                 register_trade_context(
                     ticket=res.order,
-                    risk_amount=0.0,
+                    risk_amount=risk_amount,
                     spread=round(current_spread_pips, 2),
                     slippage=0.0,
                     exhaustion_state=False,
                     volume=rates_h4[0]['tick_volume'],
-                    smc_confluence="GRID_INITIAL"
+                    smc_confluence="GRID_INITIAL",
+                    adx=adx,
+                    plus_di=0.0,
+                    minus_di=0.0,
+                    ema50=0.0,
+                    session=sess,
+                    subtype=comment
                 )
                 logger.info(f"[GRID BASE ENTRY] Executed {sym} | Lot: {base_lot} | Type: {comment} | ADX: {adx:.1f}")
             else:
@@ -255,14 +287,46 @@ def execute_grid_entries():
                 res = mt5.order_send(req)
                 if res and res.retcode == mt5.TRADE_RETCODE_DONE:
                     last_h4_bar[sym] = current_h4_time
+                    # Calculate notional risk for R-multiple tracking
+                    try:
+                        point_value = sym_info.trade_tick_value / (sym_info.trade_tick_size / sym_info.point)
+                        sl_dist_notional = h4_atr * config.ATR_MULT_SL
+                        sl_points = sl_dist_notional / sym_info.point
+                        risk_amount = sl_points * point_value * float(next_lot)
+                    except Exception:
+                        risk_amount = 0.0
+                    
+                    # Session label
+                    try:
+                        from datetime import datetime
+                        h = datetime.utcfromtimestamp(tick.time).hour
+                    except Exception:
+                        h = 0
+                    if 0 <= h < 7:
+                        sess = "ASIAN"
+                    elif 7 <= h < 12:
+                        sess = "LONDON"
+                    elif 12 <= h < 17:
+                        sess = "LONDON_NY"
+                    elif 17 <= h < 22:
+                        sess = "NY"
+                    else:
+                        sess = "LATE_NY"
+
                     register_trade_context(
                         ticket=res.order,
-                        risk_amount=0.0,
+                        risk_amount=risk_amount,
                         spread=round(current_spread_pips, 2),
                         slippage=0.0,
                         exhaustion_state=False,
                         volume=rates_h4[0]['tick_volume'],
-                        smc_confluence="GRID_LAYER"
+                        smc_confluence="GRID_LAYER",
+                        adx=adx,
+                        plus_di=0.0,
+                        minus_di=0.0,
+                        ema50=0.0,
+                        session=sess,
+                        subtype=comment
                     )
                     logger.info(f"[GRID ADDON ENTRY] Layer {current_layer+1} on {sym} | Lot: {next_lot} | Step: {adverse_move:.5f} (>= {required_spacing:.5f} ATR)")
                 else:
