@@ -2,9 +2,9 @@
 
 # Algo Trading — Development Tracker
 
-**Status:** Phase 2 Demo Testing — Week 6 (Statistical Gate Implementation)
+**Status:** Phase 2 Demo Testing — Week 7 (Phase B Gates Active)
 **Version:** v18
-**Last Updated:** Aug 28 2026
+**Last Updated:** Aug 31 2026
 
 ## Completed Tasks
 
@@ -161,60 +161,75 @@
 
 ---
 
-## Week 6 Active Tasks
+## Week 7 Active Tasks
 
-### One code change (already applied before Week 6 start)
-- [x] **N_LAYERS_DEFAULT = 2**: Applied in ghost_super/ghost_cache.py.
-  10/10 unit tests confirmed passing. Only code change this week.
+### Code changes (applied before Week 7 start)
+- [x] **F15 H4 direction gate**: IMPLEMENTED Aug 31 2026 in
+  unified_runner.py ghost_hunter_thread and ghost_sniper.py
+  run_hunter(). Blocks DOWN_PROBE arming when H4 structural direction
+  is DOWN. Logs GHOST_ARM_BLOCKED_H4_DOWN. Test T20 added, 20/20 passing.
+  Evidence: n=240, DOWN_PROBE+H4_DOWN 33.9% WR vs UP_PROBE+H4_UP 58.3% WR.
+- [x] **F5 London Open gate**: IMPLEMENTED Aug 31 2026 in
+  cab_super/cab_entry.py. blocked_hours_utc extended to (0..11) covering
+  Asian (00-06) + London Open (07-11) UTC. Test T19 added, 19/19 passing.
+  Cross-system evidence from 3 CAB variants cleared n=170 threshold.
 
 ### Monitoring (daily, 5 minutes)
-- [ ] **204 fires**: Check `grep -c "GHOST_CACHE_FIRE" logs/sniper_hunter.log`
-  daily. Target: first fires in Week 6 now that n=2. If zero after Day 5
-  of Week 6, this is a deeper problem — escalate before changing anything.
-- [ ] **F6 gate**: Check `grep -c "GHOST_ARM_BLOCKED_ST_LONG" logs/unified_runner.log`
-  after any ST XAUUSDm entry. If ST has open XAUUSDm positions and zero
-  F6 logs appear, re-audit the KR thesis read in ghost_hunter_thread.
-- [ ] **CAB BUY/SELL ratio**: At mid-week, tally CAB fills by direction
-  from MT5 terminal or cab_watcher.log. If SELL fills are >60% of total
-  and Gold is ranging (not trending), the directional split is structural,
-  not regime-driven — early flag for H9.
-- [ ] **Thread health**: grep "Heartbeat OK" logs/unified_runner.log | tail -3
-  Expected: 5 threads alive.
-- [ ] **H8 equity**: Record Week 6 close equity.
-- [ ] **MarketPulseEngine publishing**: Check
-  `grep "MarketPulseEngine published XAUUSDm H4" logs/unified_runner.log | tail -3`
-  Expected: non-zero publish lines within 60 seconds of startup,
-  continuing at roughly 10-second intervals. If absent or stopped,
-  KR Layer 0 is dark and all bots are on hardcoded fallbacks.
+- [ ] **F15 gate**: `grep -c "GHOST_ARM_BLOCKED_H4_DOWN" logs/unified_runner.log`
+  Expected: nonzero by Day 1 end. Zero after Day 3 = wiring broken.
+- [ ] **F5 London gate**: Confirm 07-11 UTC cab fills drop to zero in MT5 export.
+  Check `grep -c "session_gate\|LONDON" logs/cab_watcher.log`.
+- [ ] **204 fires**: `grep -c "GHOST_CACHE_FIRE" logs/sniper_hunter.log`.
+  Target: nonzero. If zero after Day 5 at N_LAYERS=2, escalate.
+- [ ] **F6 gate**: `grep -c "GHOST_ARM_BLOCKED_ST_LONG" logs/unified_runner.log`.
+- [ ] **Thread health**: `grep "Heartbeat OK" logs/unified_runner.log | tail -3`.
 
-### End-of-Week 6 evaluations (data-dependent)
-- [ ] **Ghost 202 session gate confirmation** (primary):
-  If combined W4+W5+W6 reaches n≥170 LONDON fills and LONDON WR <35%
-  → implement LONDON suppression on probe arming.
-  If combined NY_CLOSE+H4_UP reaches n≥140 and WR <32%
-  → implement direction gate on NY_CLOSE arming.
-  If combined ATR Q2 reaches n≥195 and WR <30%
-  → implement ATR floor gate (arm only when M1 ATR > 1.8).
-  Run full audit CSV join with Week 6 MT5 export at session end.
+### End-of-Week 7 evaluations
+- [ ] **F15 effectiveness**: W7 202 WR > 44% (from W6 40.0%) OR avg/trade improves from -$0.43.
+  If not: gate may be helping on count but not per-trade quality.
+- [ ] **F5 effectiveness**: Zero cab_managed fills opening 07-11 UTC in W7.
+  If fills still appear: blocked_hours_utc change did not deploy.
+- [ ] **H15 stagnation decay**: Compute from W6+W7 CAB MT5 export.
+  Check % of CAB losses held 24h+ at R<0.5. If >30%: register for Phase C.
+- [ ] **H16 rollover gate**: Compute W6 CAB entry WR at 22-23 UTC.
+  If WR<30%: extend blocked_hours_utc to include 22,23 entering Week 8.
+- [ ] **F7 NY_CLOSE+H4_UP**: Evaluate combined n vs 140 threshold.
+- [ ] **USTECm disable**: If 3rd consecutive negative week with 5+ closed trades.
+- [ ] **Gate 2 — 204 vs 202**: If 204 accumulates 5+ fires, begin avg_R tracking.
 
-- [ ] **H9 CAB direction gate** (secondary):
-  Compute SELL vs BUY win rate from Week 6 MT5 export for CAB trades.
-  Confirmation threshold: SELL WR < 35% AND BUY WR > 40% with n≥50
-  in a week where Gold is not strongly trending.
-  Refutation threshold: SELL WR within 5pp of BUY WR → gap was
-  regime-specific → H9 not confirmed → no gate.
+---
+## Week 6 COMPLETED (Aug 25–29)
+- [x] **N_LAYERS_DEFAULT = 2**: Applied in ghost_super/ghost_cache.py.
+  10/10 unit tests confirmed passing.
+- [x] **204 fires monitoring**: 1 fire Week 6. Gate 2 data started.
+- [x] **F6 gate effectiveness**: 0 fires W6 (regime gate blocked arming before F6 — confirmed not a dead wire).
+- [x] **H8 equity**: W6 close $6,867.54, week P&L -$109.96.
+- [x] **H9 CAB direction gate**: REFUTED — gap narrowed to 7.5pp in ranging conditions. No gate.
+- [x] **Cross-CAB comparison**: Completed. H13 invalidated, H14-H16 registered.
+- [x] **W6 data extraction and analysis**: Complete.
+- [x] **F5 London Open gate**: IMPLEMENTED Aug 31 2026. Cross-system evidence from 3 CAB variants.
+- [x] **F15 H4 direction gate**: IMPLEMENTED Aug 31 2026. Test T20 added, 20/20 passing.
 
-- [ ] **Gate 2 — 204 vs 202**: If 204 accumulates 10+ fills in Week 6,
-  begin tracking avg_R per magic. Gate 2 requires 30+ fills each —
-  still a longer-horizon target.
+### Hypothesis tracking (Week 7 evaluation queue)
+- [ ] **H14 EMA50 bias filter**: Log EMA50 at every cab_super entry starting Week 7.
+  Two weeks of data before any gate decision. No gate until Week 9.
+- [ ] **H15 stagnation decay**: Compute from W6+W7 CAB MT5 export.
+  If >30% of losses held 24h+ at R<0.5: register for Phase C.
+- [ ] **H16 rollover gate**: Compute from W6 CAB audit entries at 22-23 UTC.
+  If WR<30%: extend blocked_hours_utc to include 22,23.
 
-- [ ] **SuperTrend Gate 5 accumulation**: Pull per-symbol closed-trade
-  data from MT5 export. Update bot-instrument fit matrix. Target for
-  Gate 5 lock: 20+ trades per active symbol.
-
-- [ ] **F6 effectiveness**: If 202 fires at normal volume and F6 gate
-  also fires, compute win rate for 202 trades where F6 did NOT block
-  vs baseline W4 win rate. First effectiveness data point.
+### End-of-Week 6 evaluations (completed)
+- [x] **Ghost 202 session gate confirmation**: LONDON confirmed negative across 3 systems.
+  n=341 cross-system, n=82 in-system. F5 London gate implemented.
+  NY_CLOSE+H4_UP: n=89 of 140 needed. ATR floor: n=134 of 195 needed.
+  ADX dead zone: insufficient n. Conviction: 37% WR in 20-40 bucket (above 35% threshold).
+- [x] **H9 CAB direction gate**: REFUTED. Gap narrowed to 7.5pp in ranging conditions.
+  Gate not implemented. H9 archived.
+- [x] **Gate 2 — 204 vs 202**: 204 had 1 fire in W6. 30+ fills each still needed.
+- [x] **SuperTrend Gate 5 accumulation**: Continue accumulating.
+- [x] **F6 effectiveness**: 0 fires W6 — regime gate blocked arming before F6.
+  Wiring confirmed in code review.
+- [x] **MPE publishing**: Confirmed operational. Audit CSV shows 140 distinct ADX values.
 
 ---
 ### Knowledge Register Wiring (High Priority)

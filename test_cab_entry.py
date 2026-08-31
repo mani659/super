@@ -487,6 +487,23 @@ class TestCABEntryEngine(unittest.TestCase):
             "After grace period, new bar should allow entry")
         print("T18 PASS  Startup grace blocks cold-start re-entry")
 
+    # ── T19: London Open session gate ──────────────────────────────────────
+    def test_19_london_open_session_blocked(self):
+        """London Open (07-11 UTC) should be blocked after F5 gate."""
+        from cab_super.cab_entry import CABEntryConfig
+        cfg = CABEntryConfig()
+        # London Open hours must all be in blocked list
+        london_hours = [7, 8, 9, 10, 11]
+        for h in london_hours:
+            self.assertIn(h, cfg.blocked_hours_utc,
+                f"Hour {h}:00 UTC (London Open) should be blocked")
+        # NY_OVERLAP must NOT be blocked
+        ny_hours = [13, 14, 15, 16]
+        for h in ny_hours:
+            self.assertNotIn(h, cfg.blocked_hours_utc,
+                f"Hour {h}:00 UTC (NY session) must not be blocked")
+        print("T19 PASS  London Open session gate covers 07:00-11:59 UTC")
+
 if __name__ == "__main__":
     print("=" * 60)
     print("CAB Entry Engine verification")
@@ -497,7 +514,7 @@ if __name__ == "__main__":
     result = unittest.TextTestRunner(verbosity=0).run(suite)
     print("=" * 60)
     if result.wasSuccessful():
-        print(f"ALL {result.testsRun}/18 PASS - cab-entry-test complete")
+        print(f"ALL {result.testsRun}/19 PASS - cab-entry-test complete")
     else:
         n = len(result.failures) + len(result.errors)
         print(f"{n} FAILURE(S) - fix before wiring into unified_runner")

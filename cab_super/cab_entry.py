@@ -98,7 +98,10 @@ class CABEntryConfig:
     # ── Session gate (suppress entries during low-liquidity hours) ─────────────
     session_gate_enabled: bool = True
     # Hours (UTC) during which entries are blocked
-    blocked_hours_utc:    tuple = (0, 1, 2, 3, 4, 5, 6)   # Asian session
+    # 00-06: Asian session (low liquidity)
+    # 07-11: London Open (structurally negative across 3 independent
+    #         CAB systems — F5 confirmed, n=341 cross-system fills)
+    blocked_hours_utc:    tuple = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
 
     # ── Heartbeat ─────────────────────────────────────────────────────────────
     heartbeat_path: str = ""    # set by runner from config; empty = no write

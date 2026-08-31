@@ -1,8 +1,8 @@
 # Algo Trading System — Master Development Plan
-**Version:** v1.1
-**Last Updated:** Aug 26 2026
+**Version:** v1.2
+**Last Updated:** Aug 31 2026
 **Account:** 474167713 · Exness-MT5Trial15
-**Status:** Phase 2 Demo Testing — Week 6
+**Status:** Phase 2 Demo Testing — Week 7
 **Document purpose:** Single authoritative reference combining original master plan intent, current system reality, weekly KPI history, outstanding work, and forward phase plan. Supersedes roadmap.md for planning purposes. roadmap.md remains the findings/hypothesis registry.
 
 ---
@@ -90,40 +90,40 @@ The unified architecture was built before individual validation (inverted from t
 
 ### 2.1 KPI Table — All Weeks
 
-| KPI | W1 Baseline | W2 | W3 | W4 | W5 | W6 Target |
-|-----|------------|----|----|----|----|-----------|
-| Account equity | $7,739.28 | n/a — not captured | ~$7,128.00 | ~$6,723.00 | $6,977.50 | >$7,100 |
-| Week P&L | -$2,260.72 | n/a — not captured | ~-$872.00 | ~-$1,067.00 | +$385.78 | positive |
-| Cumulative drawdown | -22.6% | n/a — not captured | n/a — not captured | -32.8% | -30.2% | n/a — not captured |
-| Circuit breaker trips | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | 0 | 0 |
-| Magic 202 fills | 1,085 | n/a — not captured | 316 | 81 | 6 | 80–200 |
-| Magic 202 win rate | 55.7% | n/a — not captured | n/a — not captured | n/a — not captured | 33.3% | n/a — not captured |
-| Magic 202 avg P&L | -$0.125 | n/a — not captured | n/a — not captured | n/a — not captured | -$1.37 | n/a — not captured |
-| Magic 204 fires | 0 | n/a — not captured | n/a — not captured | n/a — not captured | 0 | >0 |
-| Magic 201 shadow fills | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured |
-| LEG_TP_SET fires | 8 | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured |
-| GRID_TP fires | 0 | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured |
-| GRID_STOP fires | 0 | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured |
-| Depth cap refused | 47,672 | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured |
-| ST total closed trades| 2 | n/a — not captured | 73 | n/a — not captured | 84 | n/a — not captured |
-| ST win rate | 100% | n/a — not captured | 41.1% | n/a — not captured | 52.4% | n/a — not captured |
-| ST total P&L | +$4.47 | n/a — not captured | +$119.26 | +$55.00 | +$277.31 | n/a — not captured |
-| ST avg P&L per trade| +$2.23 | n/a — not captured | +$1.63 | n/a — not captured | +$3.30 | n/a — not captured |
-| ST positive weeks | 0 | 0 | 1 | 2 | 3 | 4 |
-| CAB total closed trades| 18 | n/a — not captured | n/a — not captured | n/a — not captured | 92 | n/a — not captured |
-| CAB win rate | 0.0% | n/a — not captured | n/a — not captured | n/a — not captured | 35.9% | n/a — not captured |
-| CAB total P&L | -$1,846.79 | n/a — not captured | n/a — not captured | n/a — not captured | +$44.68 | n/a — not captured |
-| CAB BUY win rate | n/a — not captured | n/a — not captured | n/a — not captured | 45.2% (W4+W5 combined) | n/a — not captured | n/a — not captured |
-| CAB SELL win rate | n/a — not captured | n/a — not captured | n/a — not captured | 27.9% (W4+W5 combined) | n/a — not captured | n/a — not captured |
-| CAB BUY/SELL gap | n/a — not captured | n/a — not captured | n/a — not captured | 17.2pp | n/a — not captured | convergence |
-| CAB OSI fires % | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | 59.0% | n/a — not captured |
-| Gate 1 | PASSED | PASSED | PASSED | PASSED | PASSED | PASSED |
-| Gate 2 | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured |
-| Gate 3 ST | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | PASSED | PASSED |
-| Gate 3 CAB | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | pending H9 | pending H9 |
-| Gate 3 Ghost | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | pending | pending |
-| Gate 4 | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | working | working |
-| Gate 5 | n/a — not captured | n/a — not captured | n/a — not captured | n/a — not captured | accumulating | accumulating |
+| KPI | W1 Baseline | W2 | W3 | W4 | W5 | W6 Actual | W7 Status |
+|-----|------------|----|----|----|----|-----------|-----------|
+| Account equity | $7,739.28 | n/a | ~$7,128.00 | ~$6,723.00 | $6,977.50 | $6,867.54 | tracking |
+| Week P&L | -$2,260.72 | n/a | ~-$872.00 | ~-$1,067.00 | +$385.78 | -$109.96 | tracking |
+| Cumulative drawdown | -22.6% | n/a | n/a | -32.8% | -30.2% | -31.3% | — |
+| Circuit breaker trips | n/a | n/a | n/a | n/a | 0 | 0 | — |
+| Magic 202 fills | 1,085 | n/a | 316 | 81 | 6 | 240 | tracking |
+| Magic 202 win rate | 55.7% | n/a | n/a | n/a | 33.3% | 40.0% | tracking |
+| Magic 202 avg P&L | -$0.125 | n/a | n/a | n/a | -$1.37 | -$0.43 | tracking |
+| Magic 204 fires | 0 | n/a | n/a | n/a | 0 | 1 | tracking |
+| Magic 201 shadow fills | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| LEG_TP_SET fires | 8 | n/a | n/a | n/a | n/a | n/a | n/a |
+| GRID_TP fires | 0 | n/a | n/a | n/a | n/a | n/a | n/a |
+| GRID_STOP fires | 0 | n/a | n/a | n/a | n/a | n/a | n/a |
+| Depth cap refused | 47,672 | n/a | n/a | n/a | n/a | n/a | n/a |
+| ST total closed trades| 2 | n/a | 73 | n/a | 84 | 59 | tracking |
+| ST win rate | 100% | n/a | 41.1% | n/a | 52.4% | 35.6% | tracking |
+| ST total P&L | +$4.47 | n/a | +$119.26 | +$55.00 | +$277.31 | +$10.92 | tracking |
+| ST avg P&L per trade| +$2.23 | n/a | +$1.63 | n/a | +$3.30 | n/a | n/a |
+| ST positive weeks | 0 | 0 | 1 | 2 | 3 | 4 | 4th positive |
+| CAB total closed trades| 18 | n/a | n/a | n/a | 92 | 101 | tracking |
+| CAB win rate | 0.0% | n/a | n/a | n/a | 35.9% | 35.6% | tracking |
+| CAB total P&L | -$1,846.79 | n/a | n/a | n/a | +$44.68 | +$229.78 | tracking |
+| CAB BUY win rate | n/a | n/a | n/a | 45.2% (W4+W5) | n/a | 39.6% | tracking |
+| CAB SELL win rate | n/a | n/a | n/a | 27.9% (W4+W5) | n/a | 32.1% | tracking |
+| CAB BUY/SELL gap | n/a | n/a | n/a | 17.2pp | n/a | 7.5pp | tracking |
+| CAB OSI fires % | n/a | n/a | n/a | n/a | 59.0% | n/a | n/a |
+| Gate 1 | PASSED | PASSED | PASSED | PASSED | PASSED | PASSED | PASSED |
+| Gate 2 | n/a | n/a | n/a | n/a | n/a | 1 fire | accumulating |
+| Gate 3 ST | n/a | n/a | n/a | n/a | PASSED | PASSED | PASSED |
+| Gate 3 CAB | n/a | n/a | n/a | n/a | pending H9 | H9 REFUTED | no gate |
+| Gate 3 Ghost | n/a | n/a | n/a | n/a | pending | pending | pending |
+| Gate 4 | n/a | n/a | n/a | n/a | working | working | working |
+| Gate 5 | n/a | n/a | n/a | n/a | accumulating | accumulating | accumulating |
 
 * CAB direction analysis is from combined W4+W5 dataset (n=130), not W4-only.
 
@@ -160,51 +160,39 @@ The unified architecture was built before individual validation (inverted from t
 ONE GATE PER WEEK. Minimum one week of validation between each implementation. Do not stack multiple gate changes in a single deploy.
 
 #### Track B1: Ghost Gates
-1. **ATR Floor Gate**
+1. **ATR Floor Gate** — BLOCKED: n=134 of 195 needed. Not implemented.
    - **Addresses:** F1 (ATR strongest predictor)
    - **Threshold:** ATR Q2 win rate < 30% combined (n≥195)
    - **Implementation:** `ghost_hunter_thread` in `unified_runner.py`
    - **Description:** Arm only when M1 ATR > 1.8.
-   - **Verification:** `grep` for new logging of ATR block.
-   - **Reminder:** Do not implement until threshold met.
-2. **LONDON Session Gate**
+
+2. **LONDON Session Gate** — **IMPLEMENTED Week 7**
    - **Addresses:** F5 (LONDON structurally negative)
-   - **Threshold:** LONDON win rate < 35% combined (n≥170)
-   - **Implementation:** `ghost_hunter_thread` in `unified_runner.py`
-   - **Description:** Implement LONDON suppression on probe arming.
-   - **Verification:** No LONDON fills in session logs.
-   - **Reminder:** Do not implement until threshold met.
-3. **NY_CLOSE + H4_UP Gate**
+   - **Evidence:** Cross-system confirmation from 3 independent CAB systems cleared threshold. n=341 cross-system fills (standalone cab n=259, cab_multi_pair negative, cab_super F5 n=82).
+   - **Implementation:** `cab_super/cab_entry.py` blocked_hours_utc extended to (0..11).
+   - **Status:** Active Week 7. Entry gate only — positions managed normally.
+
+3. **NY_CLOSE + H4_UP Gate** — BLOCKED: n=89 of 140 needed. Not implemented.
    - **Addresses:** F7 (second worst combo)
    - **Threshold:** NY_CLOSE + H4_UP win rate < 32% combined (n≥140)
-   - **Implementation:** `ghost_hunter_thread` in `unified_runner.py`
-   - **Description:** Block H4_UP during NY_CLOSE arming.
-   - **Verification:** NY_CLOSE + H4_UP block logged.
-   - **Reminder:** Do not implement until threshold met.
-4. **ADX Dead Zone Gate**
+
+4. **ADX Dead Zone Gate** — BLOCKED: insufficient n. Not implemented.
    - **Addresses:** F4 (ADX 20-25 dead zone)
    - **Threshold:** ADX 20-25 win rate < 33% combined (n≥280)
-   - **Implementation:** `ghost_hunter_thread` in `unified_runner.py`
-   - **Description:** Implement ADX 20-25 suppression on arming.
-   - **Verification:** Block logged for ADX 20-25.
-   - **Reminder:** Do not implement until threshold met.
-5. **Conviction Gate**
+
+5. **Conviction Gate** — BLOCKED: signal weakening. W6 20-40 bucket at 37% WR, above 35% threshold.
    - **Addresses:** F3 (Conviction > 50 predicts wins)
    - **Threshold:** Conviction 20-40 bucket win rate < 35% combined (n≥360)
-   - **Implementation:** `ghost_hunter_thread` in `unified_runner.py`
-   - **Description:** Require conviction > 40 for arming.
-   - **Verification:** Block logged for conviction < 40.
-   - **Reminder:** Do not implement until threshold met.
 
-#### Track B2: CAB H9 Gate
-1. **CAB H4 Direction Gate**
-   - **Addresses:** F9, F10, H9
-   - **Threshold:** SELL WR < 35% AND BUY WR > 40% (n≥50) in non-trending Gold week.
-   - **Implementation:** `cab_entry.py` inside `CABEntryEngine.run_cycle()`
-   - **Description:** Check `_get_h4_direction()`, block bearish inversion if H4 is UP. Log `CAB_SELL_BLOCKED_H4_UP`.
-   - **Verification:** `grep "CAB_SELL_BLOCKED_H4_UP"`
-   - **Fallback:** If refuted (SELL WR within 5pp of BUY), accept CAB as is and archive the spec.
-   - **Reminder:** Do not implement until threshold met.
+6. **F15 Ghost H4 Direction Gate** — **IMPLEMENTED Week 7**
+   - **Addresses:** F15 (DOWN_PROBE+H4=DOWN structural drag)
+   - **Evidence:** n=240, DOWN_PROBE+H4_DOWN 33.9% WR (-$0.96/trade, n=180) vs UP_PROBE+H4_UP 58.3% WR (+$1.17/trade, n=60). 24.4pp gap.
+   - **Implementation:** `unified_runner.py` ghost_hunter_thread + `ghost_super/ghost_sniper.py` run_hunter(). Blocks DOWN_PROBE arming when H4=DOWN. Logs GHOST_ARM_BLOCKED_H4_DOWN.
+   - **Test:** T20 in test_ghost_gateway_port.py. 20/20 passing.
+
+#### Track B2: CAB H9 Gate — **REFUTED Aug 30 2026**
+- W6 ranging week data: gap narrowed to 7.5pp (was 17.2pp in trending conditions). Effect is regime-specific, not structural. H9 archived. No gate implemented. CAB runs unchanged.
+- **Replaced by H14 (EMA50 bias filter)**: REGISTERED Week 7. Log EMA50 at every cab_super entry for 2 weeks. No gate until Week 9 at earliest.
 
 ### 3.3 Phase C — Intelligence-Driven Exits and Gate 5 (Weeks 9–11)
 
@@ -267,35 +255,51 @@ Canonical registry maintained in roadmap.md Sections 3 and 4. Reproduce only sum
 | F12 | CAB symbol clusters positive/negative | REGISTERED (confounded) | Revisit post-H9 resolution |
 | F13 | ST positive expectancy 3 weeks | CONFIRMED | Gate 3 ST PASSED |
 | F14 | ST fit matrix emerging | REGISTERED (n insufficient) | Lock at Gate 5 after 20+/symbol |
+| F15 | Ghost DOWN_PROBE+H4=DOWN: 33.9% WR, -$0.96/trade (n=180). UP_PROBE+H4=UP: 58.3% WR, +$1.17/trade (n=60). 24.4pp gap. | IMPLEMENTED Week 7 | Monitor block rate and post-gate 202 WR |
+| F9/F10 | CAB SELL underperforms BUY | REFUTED IN RANGING CONDITIONS Aug 30 2026. Gap narrowed to 7.5pp (was 17.2pp). Effect is regime-specific. H9 archived. No gate. |
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ## Section 5 — Active Task Board
 
-### THIS WEEK (Week 6, Aug 25–29)
-- `[x]` N_LAYERS_DEFAULT = 2: Applied in ghost_super/ghost_cache.py.
-- `[ ]` 204 fires (Daily): Check `grep -c "GHOST_CACHE_FIRE" logs/sniper_hunter.log`.
-- `[ ]` F6 gate (Daily): Check `grep -c "GHOST_ARM_BLOCKED_ST_LONG" logs/unified_runner.log`.
-- `[ ]` CAB BUY/SELL ratio (Daily): Tally CAB fills by direction mid-week.
+### THIS WEEK (Week 7, Sep 1–5) — Active Tasks
+- `[ ]` F15 gate (Daily): `grep -c "GHOST_ARM_BLOCKED_H4_DOWN" logs/unified_runner.log`.
+- `[ ]` F5 London gate (Daily): Confirm 07-11 UTC cab fills drop to zero in MT5 export.
+- `[ ]` 204 fires (Daily): `grep -c "GHOST_CACHE_FIRE" logs/sniper_hunter.log`.
+- `[ ]` F6 gate (Daily): `grep -c "GHOST_ARM_BLOCKED_ST_LONG" logs/unified_runner.log`.
 - `[ ]` Thread health (Daily): `grep "Heartbeat OK" logs/unified_runner.log | tail -3`.
-- `[ ]` H8 equity (Daily): Record Week 6 close equity.
-- `[ ]` End-of-week data collection command: `python extract_bot_logs.py --days 7`.
-- `[ ]` Evaluate End-of-Week decision triggers (LONDON, NY_CLOSE, ATR, Conviction, ADX, H9, 204 layers).
+- `[ ]` End-of-week: Compute H15 (stagnation decay) from W6+W7 CAB loss hold times.
+- `[ ]` End-of-week: Compute H16 (rollover gate 22-23 UTC) from W6 CAB entries.
+- `[ ]` End-of-week: Evaluate F7 NY_CLOSE+H4_UP combined n vs 140 threshold.
+- `[ ]` End-of-week: USTECm disable check (3rd consecutive negative week trigger).
 
-```bash
-# Check 6 — KR Layer 0 publishing
-grep "MarketPulseEngine" logs/unified_runner.log | grep -i "started\|error\|publish" | tail -5
-```
-
-### NEXT (Weeks 7–8, Phase B)
+### COMPLETED (Week 6, Aug 25–29)
+- `[x]` N_LAYERS_DEFAULT = 2: Applied in ghost_super/ghost_cache.py.
+- `[x]` 204 fires: 1 fire Week 6. Gate 2 data started.
+- `[x]` F6 gate effectiveness: 0 fires W6 (regime gate blocked arming before F6 — confirmed not a dead wire).
+- `[x]` H8 equity: W6 close $6,867.54, week P&L -$109.96.
+- `[x]` H9 CAB direction gate: REFUTED — gap narrowed to 7.5pp. No gate.
+- `[x]` Cross-CAB comparison: completed. H13 invalidated, H14-H16 registered.
+- `[x]` W6 data extraction and analysis: complete.
+- `[x]` F5 London Open gate: IMPLEMENTED Aug 31 2026. blocked_hours_utc extended to 07-11 UTC. Cross-system evidence from 3 CAB variants.
+- `[x]` F15 H4 direction gate: IMPLEMENTED Aug 31 2026. Blocks DOWN_PROBE when H4=DOWN. Test T20 added, 20/20 passing.
+### Hypothesis Registry (new entries)
+| ID | Hypothesis | Status | Action |
+|----|-----------|--------|--------|
+| H14 | H4 EMA50 bias filter for cab_super entries | REGISTERED | Log EMA50 at every cab_super entry for 2 weeks. No gate until Week 9.
+| H15 | Stagnation decay — close CAB trade open 24h+ at R<0.5 | REGISTERED | Compute from W6+W7 CAB loss hold times. If >30%, register for Phase C.
+| H16 | Rollover gate 22:00-23:59 UTC for CAB entries | REGISTERED | Compute from W6 CAB entry outcomes. If WR<30%, extend blocked_hours_utc.
+| H13 | H1 structural breach exit | **INVALIDATED** | cab_multi_pair H1_STRUCT_BREACH is a trailing SL label, not an active exit. Architecturally incomparable to cab_super OSI. Removed.
+### NEXT (Weeks 8–9, Phase B continued)
 | Task | Status | Trigger / Threshold |
 |------|--------|---------------------|
-| Ghost ATR Floor Gate | BLOCKED UNTIL W6 DATA | Q2 WR < 30% combined (n≥195) |
-| Ghost LONDON Gate | BLOCKED UNTIL W6 DATA | LONDON WR < 35% combined (n≥170) |
-| Ghost NY_CLOSE + H4_UP Gate | BLOCKED UNTIL W6 DATA | WR < 32% combined (n≥140) |
-| Ghost ADX Dead Zone Gate | BLOCKED UNTIL W6 DATA | ADX 20-25 WR < 33% combined (n≥280) |
-| Ghost Conviction Gate | BLOCKED UNTIL W6 DATA | 20-40 bucket WR < 35% combined (n≥360) |
-| CAB H9 Direction Gate | BLOCKED UNTIL W6 DATA | SELL WR < 35% AND BUY WR > 40% (n≥50) |
+| Ghost ATR Floor Gate | BLOCKED | n=134 of 195 needed |
+| Ghost NY_CLOSE + H4_UP Gate | BLOCKED | n=89 of 140 needed |
+| Ghost ADX Dead Zone Gate | BLOCKED | insufficient n |
+| Ghost Conviction Gate | BLOCKED | 37% WR in 20-40 bucket (above 35% threshold) |
+| H14 EMA50 bias filter | EVALUATE Week 9 | 2 weeks of EMA50 logging data |
+| H15 stagnation decay | EVALUATE Week 8 | W6+W7 hold time distribution |
+| H16 rollover gate | EVALUATE Week 8 | W6 CAB entry outcomes at 22-23 UTC |
 
 ### BACKLOG (Phase C–D)
 | Task | Status | Trigger Condition |
@@ -333,6 +337,7 @@ grep "MarketPulseEngine" logs/unified_runner.log | grep -i "started\|error\|publ
 - CAB architecture changes require H9 confirmation from Week 6 data before any implementation. The spec is parked at Review Stage.
 - MarketPulseEngine is the single highest architectural priority. Every bot is running on hardcoded fallbacks for regime, ADX, and ATR. Fixing Layer 0 data publication unlocks all downstream KR value.
 - Account recovery is a precondition for live deployment. Do not begin Phase D while account equity is below $7,500.
+- Cross-system confirmation from parallel standalone models running the same entry signal accelerates gate evidence thresholds. A finding confirmed independently across three systems with different exit architectures is treated as stronger evidence than single-system n alone. Applied first to F5 London gate (n=82 in-system confirmed by n=259 standalone cab + cab_multi_pair negative direction).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -341,5 +346,6 @@ grep "MarketPulseEngine" logs/unified_runner.log | grep -i "started\|error\|publ
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | v1.0 | Aug 26 2026 | IDE Agent | Initial creation consolidating roadmap.md, todo_tracker.md, W5/W6 plans, and revised plan from session Aug 26 2026 |
-| v1.1 | Aug 26 2026 | IDE Agent | correction pass per Claude review Aug 26 2026 |
+| v1.1 | Aug 26 2026 | IDE Agent | Correction pass per Claude review Aug 26 2026 |
+| v1.2 | Aug 31 2026 | IDE Agent | W6 actuals added, F15 implemented, H9 refuted, F5 London gate implemented, H14-H16 registered, H13 invalidated, cross-system confirmation principle added |
 

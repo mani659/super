@@ -643,6 +643,21 @@ def ghost_hunter_thread(gateway: MT5Gateway, shared: SharedState,
                         stop.wait(1)
                         continue
 
+                    # F15: block DOWN_PROBE when H4 structural direction is DOWN
+                    try:
+                        h4_dir = gh._get_h4_direction()
+                    except Exception:
+                        h4_dir = "UNKNOWN"
+
+                    if current_price < recent_low and h4_dir == "DOWN":
+                        log.info(
+                            f"GHOST_ARM_BLOCKED_H4_DOWN | "
+                            f"price={round(current_price,3)} | "
+                            f"h4={h4_dir} — DOWN_PROBE suppressed"
+                        )
+                        stop.wait(GHOST_INTERVAL)
+                        continue
+
                     if current_price > recent_high:
                         armed, probe_extreme = "UP_PROBE", current_price
                         break_level = current_price - dynamic_step

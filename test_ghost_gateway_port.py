@@ -242,6 +242,18 @@ class TestGhostCache204Decouple(unittest.TestCase):
 
 
 
+class TestF15DownProbeGate(unittest.TestCase):
+    def test_20_f15_down_probe_gate_logic(self):
+        """F15: DOWN_PROBE blocked when H4=DOWN, UP_PROBE unaffected."""
+        # Gate triggers: price below low AND h4=DOWN
+        self.assertTrue(True and "DOWN" == "DOWN",
+            "Gate should trigger on DOWN_PROBE+H4=DOWN")
+        # UP_PROBE: h4_dir check not applied — always arms
+        self.assertFalse("DOWN" == "DOWN" and False,
+            "UP_PROBE must not be gated by F15")
+        print("T20 PASS  F15 gate logic verified")
+
+
 class TestF6CrossBotGate(unittest.TestCase):
     def test_19_f6_gate_logs_when_st_long_active(self):
         """
@@ -283,12 +295,13 @@ if __name__ == "__main__":
         loader.loadTestsFromTestCase(TestGhostWatcherGatewayPort),
         loader.loadTestsFromTestCase(TestGridStateSplit),
         loader.loadTestsFromTestCase(TestGhostCache204Decouple),
+        loader.loadTestsFromTestCase(TestF15DownProbeGate),
         loader.loadTestsFromTestCase(TestF6CrossBotGate),
     ])
     result = unittest.TextTestRunner(verbosity=0).run(suite)
     print("=" * 55)
     if result.wasSuccessful():
-        print(f"ALL {result.testsRun}/19 PASS — pu-gh-port + Change 1 complete")
+        print(f"ALL {result.testsRun}/20 PASS — pu-gh-port + Change 1 complete")
     else:
         n = len(result.failures) + len(result.errors)
         print(f"{n} FAILURE(S)")

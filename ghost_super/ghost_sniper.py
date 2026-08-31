@@ -763,6 +763,21 @@ def run_hunter():
                         time.sleep(1)
                         continue
 
+                    # F15: block DOWN_PROBE when H4 structural direction is DOWN
+                    try:
+                        h4_dir = _get_h4_direction()
+                    except Exception:
+                        h4_dir = "UNKNOWN"
+
+                    if current_price < recent_low and h4_dir == "DOWN":
+                        logger.info(
+                            f"GHOST_ARM_BLOCKED_H4_DOWN | "
+                            f"price={round(current_price,3)} | "
+                            f"h4={h4_dir} — DOWN_PROBE suppressed"
+                        )
+                        time.sleep(1)
+                        continue
+
                     if current_price > recent_high:
                         armed         = "UP_PROBE"
                         probe_extreme = current_price
