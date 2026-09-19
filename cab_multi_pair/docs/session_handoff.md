@@ -1,8 +1,8 @@
 # Session Handoff Document: CAB Multi-Pair Master
 
-**Date of Handoff:** August 23, 2026
+**Date of Handoff:** 19 Sep 2026
 **Target Audience:** Incoming AI Models / Developers
-**Current Phase:** Phase 1 (The Incubation Run)
+**Current Phase:** LTF research logging ongoing; week Sep 13–19 net ≈ –$324; LiqSweptPrior all-zero; no live filters
 
 ---
 
@@ -10,22 +10,46 @@
 The `cab_multi_pair` repository operates an independent, standalone MetaTrader 5 bot designed to run across 11 different currency/commodity pairs simultaneously. It shares its architectural roots with the CAB strategy but functions entirely separately from both the `Super` monolith and the single-pair `cab` bot.
 
 **Core Philosophy:** 
-This engine is built strictly as a data-collection engine (Incubation Run) designed to generate a 50-100 trade statistical dataset across all 11 pairs.
+This engine is built as a data-collection and management-experiment engine. It is currently running a controlled demo experiment: splitting management thresholds by volatility group to test whether LOW-vol FX pairs improve without harming HIGH-vol outlier capture.
 
 ## 2. Current State & Recent Accomplishments
-The architecture is fully decoupled into 9 distinct core modules (`main`, `config`, `connection`, `utils`, `signals`, `execution`, `trade_manager`, `ledger`, and `analytics/intelligencia`).
+Week Sep 13–19 produced n=45 closes, net ≈ –$324 (improved from –$929 prior week but still negative). LTF structure research logging deployed and working — all three flags (liq_swept_prior, fvg_with_signal, dist_next_pool_atr) populate on new entries. LiqSweptPrior is all-zero (telemetry issue to diagnose). No live filters promoted from LTF data — Phase 3 threshold not met.
 
-**Active & Proven Mechanisms (Do Not Remove):**
-1. **COMPRESSION_LOW Optimizations:** Implemented a 6-hour age filter on `H1_STRUCT_BREACH` exits to prevent whipsaw kills. The intelligencia engine correctly drops entries when `Macro_Risk_Sentiment == "RISK_OFF"` and `H1_ATR_State == "COMPRESSION_LOW"`.
-2. **Completed Candle Sampling:** Entry signals (`signals.py`) query only completed H4/H1 bars (index 1 and 2) to eliminate repainting.
-3. **Immortal Python Watchdog:** Execution operates inside a `run.bat` loop that instantly restarts Python on a crash. MQL5 `CAB_Engine_Dashboard.mq5` acts purely as a visual health sentinel and NEVER modifies trades (to avoid MT5/Python race conditions).
-4. **Config-Tethered Execution:** A hard `MAX_SPREAD` liquidity filter prevents toxic spread entries. `BE_GATE_R` and `LOCK_GATE_R` targets dynamically secure break-even earlier on highly volatile pairs (Gold/Crypto).
+Key findings: BROKER_SL cohort (n=12, –$584, avgR –0.75R) is the primary loss driver. BE_Hit trades net +$504 vs non-BE trades net –$791. Management split dominates outcomes.
+
+See `docs/week_Sep13_19_summary.md` for full week analysis.
 
 ## 3. Active Directives (Do Not Violate)
 - **Bot Boundaries Mandate:** Never mix patches from `Super` (V1/V2) or the standalone single-pair `cab` bot into this repository. This system operates its own execution lifecycle and has its own risk constraints.
-- **Data over Speculation:** Do not attempt to tweak logic, SL distances, or logic filters based on short-term winning or losing streaks. This Phase 1 system must run uninterrupted to generate raw statistical data. Any future trade filters must be translated directly from data science reviews (Phase 2), not speculative hypotheses.
+- **Demo Experiment Lock:** No entry signal changes, no ADX/session hard filters, no PARTIAL_R execution, no pair removals during the experiment week. Observation-layer logging only.
+- **Data over Speculation:** Do not attempt to tweak logic, SL distances, or logic filters based on short-term winning or losing streaks. Any future trade filters must be translated directly from data science reviews, not speculative hypotheses.
+- **LTF Research Lock:** No entry filters from LTF flags until Phase 3 threshold met (≥80 closes or 4 weeks from 13 Sep). LiqSweptPrior treated as broken until diagnostic fix.
 
-## 4. Immediate Next Steps for Incoming Model
-- Run the system through `start_bot.bat` and monitor the `cab_performance_ledger.csv`.
-- Wait for the 50-100 trade milestone across the 11 pairs to be reached before moving to Phase 2 (Data Science Review).
-- If evaluating the ledger, analyze macro alignment (DXY proxy vs major pairs), Session Edge (London/NY overlap), and stagnation metrics.
+## 4. Current Configuration Summary
+
+| Parameter | HIGH (BTC, ETH, XAU, XAG, USTEC, USOIL) | LOW (EURUSD, GBPUSD, USDJPY, EURGBP, AUDNZD) |
+|-----------|------------------------------------------|-----------------------------------------------|
+| BE_GATE_R | 0.5 | 0.5 |
+| LOCK_GATE_R | 1.0–1.5 (per-pair) | 0.8 |
+| H1_MIN_HOURS | 6.0 | 12.0 |
+| RISK_PERCENT | 0.5–1.0 (per-pair, unchanged) | 1.0 |
+| ATR_MULT_SL | 2.5–3.0 (per-pair, unchanged) | 2.5 |
+
+All 11 pairs active. MAGIC_NUMBER = 999555. STAGNATION_HOURS = 24.
+
+## 5. Immediate Next Steps for Incoming Model
+- Verify LTF columns (liq_swept_prior, fvg_with_signal, dist_next_pool_atr) appear on new ledger rows.
+- Do NOT introduce entry filters from LTF flags — research logging only.
+- Confirm loss caps, BE/LOCK management, vol-group thresholds all operational.
+- Track n toward Phase 3 threshold (≥80 closes with valid LTF fields or 4 weeks from 13 Sep).
+- Reference `docs/week_Sep13_19_summary.md` for week findings.
+- Reference `docs/next_week_plan_multipair.md` for week ahead plan.
+
+## 6. Key References
+- `docs/week_Sep13_19_summary.md` — Sep 13–19 week analysis
+- `docs/next_week_plan_multipair.md` — week ahead plan and success criteria
+- `docs/ltf_structure_research_plan.md` — LTF flag research plan
+- `docs/decision_log_2026-09-05.md` — vol-group experiment rationale
+- `docs/feature_history.md` — v18.7 section for parameter table
+- `docs/architecture.md` — 9-module system design
+- `docs/week_analysis_history.md` — prior weekly reviews

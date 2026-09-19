@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import config
+from analytics.ltf_structure import get_ltf_flags
 
 def _calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
     """Calculates Average Directional Index (ADX) without TA-Lib."""
@@ -153,5 +154,18 @@ def get_entry_intelligence(symbol: str, direction: str = None) -> dict:
 
     except Exception:
         pass  # Silently fail open to ensure execution is never blocked
+
+    # --- LTF Structure Research Flags (M15) --- research only, no order impact
+    try:
+        ltf = get_ltf_flags(symbol, direction or "BUY")
+        snapshot["liq_swept_prior"] = ltf["liq_swept_prior"]
+        snapshot["fvg_with_signal"] = ltf["fvg_with_signal"]
+        snapshot["dist_next_pool_atr"] = ltf["dist_next_pool_atr"]
+        snapshot["ltf_tf"] = ltf["ltf_tf"]
+    except Exception:
+        snapshot["liq_swept_prior"] = 0
+        snapshot["fvg_with_signal"] = 0
+        snapshot["dist_next_pool_atr"] = 0.0
+        snapshot["ltf_tf"] = "M15"
 
     return snapshot

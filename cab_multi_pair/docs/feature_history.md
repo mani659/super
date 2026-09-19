@@ -96,3 +96,73 @@
 * W33 (17–21 Aug): 61.5% WR, +35.8 R (heavily outlier-driven by one USTECm +17.2 R and one BTC +10.8 R).
 * W34 (25–28 Aug): 38.1% WR, –2.5 R.
 * Conclusion: The 55–61% “breakthrough” was not a new baseline; the system reverts toward mid-30s / low-40s win rate when large outliers are absent.
+
+---
+
+## v18.7 — Vol-Group Management + Path Logging (5 Sep 2026)
+
+**Classification:** Demo experiment — management threshold split + observation-layer path clocks.
+
+**What changed:**
+
+Management thresholds (BE_GATE_R, LOCK_GATE_R, H1_MIN_HOURS) are
+now split by volatility group. Entry logic, signals, pair list, risk %,
+and trailing formula are unchanged.
+
+| Pair | VolGroup | BE_GATE_R | LOCK_GATE_R | H1_MIN_HOURS |
+|------|----------|-----------|-------------|--------------|
+| XAUUSDm | HIGH | 0.5 | 1.0 | 6.0 |
+| BTCUSDm | HIGH | 0.5 | 1.5 | 6.0 |
+| ETHUSDm | HIGH | 0.5 | 1.5 | 6.0 |
+| USTECm | HIGH | 0.5 | 1.0 | 6.0 |
+| USOILm | HIGH | 0.5 | 1.0 | 6.0 |
+| XAGUSDm | HIGH | 0.5 | 1.2 | 6.0 |
+| EURUSDm | LOW | 0.5 | 0.8 | 12.0 |
+| GBPUSDm | LOW | 0.5 | 0.8 | 12.0 |
+| USDJPYm | LOW | 0.5 | 0.8 | 12.0 |
+| EURGBPm | LOW | 0.5 | 0.8 | 12.0 |
+| AUDNZDm | LOW | 0.5 | 0.8 | 12.0 |
+
+**Path clock columns added to ledger CSV:**
+
+- TimeTo0_3R_Hours — hours from open when peak_r first reached 0.3
+- TimeTo0_5R_Hours — hours from open when peak_r first reached 0.5
+- TimeToMAE_0_5_Hours — hours from open when MAE first hit –0.5R
+- VolGroup — HIGH or LOW
+- H1_MinHours_Config — pair\'s H1_MIN_HOURS value
+
+Path clocks are pure observation. They do not trigger any trade action.
+The objective is to measure winner vs loser path characteristics after
+entry and identify early-differentiation signals.
+
+**Rationale:** See decision_log_2026-09-05.md. LOW-vol pairs rarely
+reached the old 1.0R lock gate. Lowering BE to 0.5R and lock to 0.8R
+for LOW-vol gives them a faster path to break-even and trailing. HIGH-vol
+lock values are unchanged; only BE is lowered to 0.5R.
+
+**Files touched:** config.py (VOL_GROUPS dict, get_vol_group helper,
+per-pair H1_MIN_HOURS, updated BE/LOCK values), 	rade_manager.py
+(path clock logic, H1_MIN_HOURS read), ledger.py (3 state dicts, 5
+CSV columns, cleanup). Zero entry logic changes.
+
+## [observation] - 2026-09-19 (LTF Research Logging Segment 1: Sep 13–19)
+
+### Runtime Behaviour — No Code Changes
+- LTF structure research logging active since ~13 Sep 2026 (Phase 1–2).
+- Three M15 flags (liq_swept_prior, fvg_with_signal, dist_next_pool_atr) wired into ledger.py and intelligencia.py.
+- All 11 pairs active. No entry logic changes.
+
+### Segment 1 Results (MT5 account 260714012, magic 999555)
+- 45 closed trades, net ≈ –$324 (20W/25L). Improved from –$929 prior week.
+- BROKER_SL cohort: n=12, –$584, avgR –0.75R. BE never armed on these trades.
+- BE_Hit=True trades: net +$504. BE_Hit=False trades: net –$791. Management split dominates.
+- Exit mix: H1_STRUCT_BREACH 13, BROKER_TP 12, BROKER_SL 12, OPP_H4_SIGNAL 6, STAGNATION_DECAY 2.
+
+### LTF Flag Outcomes
+- **LiqSweptPrior:** All-zero on every row. No information. Telemetry issue — diagnose before using.
+- **FvgWithSignal:** Fvg=1 worse in $ than Fvg=0 on this sample. No live filter justified.
+- **DistNextPoolAtr:** <0.1 ATR bucket least bad / slightly green; farther buckets weaker. Hint only — n too small for statistical significance.
+- **Phase 3 threshold NOT met** (need ≥80 closes with valid LTF fields or 4 weeks from 13 Sep).
+
+### Key Observation
+Logging pipeline works — all three LTF columns populate on new entries. No proof for promoting any flag to a live gate. LiqSweptPrior all-zero is a telemetry issue, not a trading signal.
