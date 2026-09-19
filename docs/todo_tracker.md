@@ -2,9 +2,9 @@
 
 # Algo Trading — Development Tracker
 
-**Status:** Phase 2 Demo Testing — Week 7 (Phase B Gates Active)
-**Version:** v18
-**Last Updated:** Aug 31 2026
+**Status:** Phase 2 Demo Testing — Week 10 (NY_OVERLAP Gate + USTECm Disable)
+**Version:** v22
+**Last Updated:** Sep 19 2026
 
 ## Completed Tasks
 
@@ -159,9 +159,96 @@
 - [x] **N_LAYERS_DEFAULT lowered to 2** (Aug 22 2026) in
   ghost_super/ghost_cache.py. Only code change entering Week 6.
 
+### Week 6 Performance & Analysis (Aug 25–29 2026)
+- [x] **Week 6 equity close**: $6,867.54 (-$109.96 for the week, -31.3%
+      inception drawdown). Ghost 202 primary loss driver (-$103.00).
+- [x] **Ghost 202**: 240 fills, 40.0% WR, -$103.00. All fills are UP_PROBE
+      (SELL reversals). Zero matched DOWN_PROBE fills in observation window.
+      H4=DOWN fills = 180 of 240 raw (134 of 229 matched outcomes) at
+      36.6% WR (matched), -$0.79/trade.
+      H4=UP fills = 60 of 240 raw (95 of 229 matched outcomes) at
+      48.4% WR (matched), +$0.27/trade. Note: 58.3% WR figure cited
+      elsewhere is from raw unmatched audit CSV. 48.4% from confirmed
+      closed fills is the authoritative number for gate design.
+      11 fills unmatched — positions open at MT5 export time.
+      10.1pp WR gap confirmed (48.4% vs 38.3% on matched fills) —
+      F15 gate pre-approved and implemented.
+- [x] **Ghost 204**: 1 fire (first ever). SELL, UP_PROBE, H4=DOWN, RANGING,
+      conviction=70.2. Won $1.15. Gate 2 data collection started.
+- [x] **SuperTrend**: 59 trades, 35.6% WR, +$10.92. Fourth consecutive
+      positive week. Gate 3 ST confirmed.
+- [x] **CAB**: 101 trades, 35.6% WR, +$229.78. BUY 39.6% WR vs SELL 32.1%
+      WR — gap narrowed to 7.5pp in ranging week. H9 REFUTED.
+- [x] **H9 REFUTED Aug 30 2026**: CAB SELL/BUY gap narrowed from 17.2pp
+      (W4+W5 trending) to 7.5pp (W6 ranging). Effect is regime-specific.
+      No direction gate implemented. Spec archived.
+- [x] **W4 findings scorecard completed**: F2 and F7 fully inverted W4→W6
+      (NY_OVERLAP+H4_DOWN: 64.5%→21.7% WR; NY_CLOSE+H4_UP: 27.8%→41.2%).
+      F4 inverted (ADX 20-25 worst→best bucket). All three permanently retired.
+      F1/F5/F8 held directionally. F15 confirmed as dominant predictor.
+- [x] **Cross-CAB comparison completed**: 3 parallel CAB systems analyzed.
+      H13 (H1_STRUCT_BREACH) invalidated — trailing SL label, not active signal.
+      H14 (EMA50 bias filter) registered from standalone cab code.
+      H15/H16 registered as computable hypotheses. London finding cross-confirmed.
+- [x] **F15 IMPLEMENTED Sep 1 2026**: Ghost DOWN_PROBE blocked when H4=DOWN.
+      unified_runner.py ghost_hunter_thread + ghost_sniper.py run_hunter().
+      Logs GHOST_ARM_BLOCKED_H4_DOWN. Test T20 added, 20/20 passing.
+- [x] **F5 IMPLEMENTED Sep 1 2026 (CAB)**: blocked_hours_utc extended to
+      07-11 UTC in cab_entry.py. Cross-system evidence from 3 CAB systems
+      cleared single-system n=170 threshold. Test T19 added, 19/19 passing.
+- [x] **MPE confirmed operational**: ADX 140 distinct values, live regime labels
+      in W6 audit CSV. Zero publish count was log-level routing, not a data failure.
+
 ---
 
-## Week 7 Active Tasks
+## Week 7 Performance & Analysis (Sep 1–5 2026)
+- [x] **Week 7 equity close**: $6,803.71 (+$35.95 for the week, -31.9%
+      inception drawdown). Weekend gap on open: -$99.78 (CAB positions).
+- [x] **Ghost 202**: 168 closed fills, 45.2% WR, -$24.68. 178 raw fills
+      (165 matched to MT5 outcomes). Zero fills Sep 4–5 — F6 suppressed
+      all arming (2,354 GHOST_ARM_BLOCKED_ST_LONG events) while ST held
+      LONG on XAUUSDm. H4 direction signal INVERTED vs W6: H4=DOWN
+      +$0.27/tr (was -$0.82), H4=UP -$0.72/tr (was +$0.18).
+- [x] **H4 inversion → B1b DEFERRED**: B1b counterfactual would have
+      hurt W7 by ~$27. New readiness criterion: H4=DOWN avg < -$0.50/tr
+      AND H4=UP avg > +$0.10/tr in BOTH W8 AND W9. F15 block-count
+      criterion retired — DOWN_PROBE armed once in 832 events; F15
+      fired 0 times in W7 (dead code in practice).
+- [x] **Session dimension registered (H22)**: ASIAN +$0.36/tr (n=85),
+      LONDON +$0.09/tr (n=38), NY_CLOSE -$0.98/tr (n=24), NY_OVERLAP
+      -$2.32/tr (n=18). NY sessions = -$65.28 of W7 Ghost loss;
+      ASIAN+LONDON = +$33.50 profit. Analysis only — W8+W9 data
+      required before any gate evaluation.
+- [x] **SuperTrend**: 66 trades, 42.4% WR, -$29.56. Four-week positive
+      streak ended. Primary drag: XAGUSDm -$48.75 (25% WR, n=8).
+      USTECm recovered (80% WR, +$7.19, n=5) — disable trigger NOT met.
+- [x] **CAB**: 48 trades, 27.1% WR, +$85.50. Outlier-driven: XAUUSDm
+      +$79.39 (n=3), XAGUSDm +$34.10 (n=5). BUY 29.2% WR -$44.93 vs
+      SELL 25.0% WR +$130.43 (outlier-dominated). F5 London gate held:
+      0 CAB entries 07:00-11:59 UTC.
+- [x] **Ghost 204**: 1 fire in W7 (-$2.72). 3 all-time fires
+      (W3 +$1.35, W6 +$1.15, W7 -$2.72), WR=66.7%, cumulative -$0.22.
+      Gate 2 requires 30 fires — accumulating at ~1/week, earliest
+      completion W11-12.
+- [x] **H15 CLOSED**: 1 of 115 W6+W7 CAB losses (0.9%) open 24h+ at
+      R<0.5. Far below 30% threshold. No stagnation pattern.
+- [x] **H16 CLOSED**: 0 CAB entries at 22:00-23:59 UTC across W6+W7.
+      Rollover gate not needed.
+- [x] **ATR gate DEFERRED**: All-time H4=UP quartiles (n=267) — best
+      bucket Q2 (1.33–1.74) reaches only +$0.01/tr. ATR alone cannot
+      create positive expectancy. Trigger: W8+W9 H4=UP WR > 42% and
+      avg > $0.00/tr before threshold derivation.
+- [x] **Magic 201 shadow pipeline CONFIRMED BROKEN**: 828 VIRTUAL_FILL
+      events logged, zero audit CSV rows. is_shadow=True path in
+      send_order() does not write to sniper_v51_live_audit.csv.
+      Registered as code task under Deferred / Parked Items.
+- [x] **Audit CSV unified-mode write path**: NOT yet confirmed. Sep 4–5
+      produced zero Ghost fills (F6-blocked), so no rows would have been
+      written regardless. MUST verify before W8 Ghost fires.
+
+---
+
+## Week 7 Active Tasks (Sep 1–5 2026)
 
 ### Code changes (applied before Week 7 start)
 - [x] **F15 H4 direction gate**: IMPLEMENTED Aug 31 2026 in
@@ -174,62 +261,82 @@
   Asian (00-06) + London Open (07-11) UTC. Test T19 added, 19/19 passing.
   Cross-system evidence from 3 CAB variants cleared n=170 threshold.
 
-### Monitoring (daily, 5 minutes)
-- [ ] **F15 gate**: `grep -c "GHOST_ARM_BLOCKED_H4_DOWN" logs/unified_runner.log`
-  Expected: nonzero by Day 1 end. Zero after Day 3 = wiring broken.
-- [ ] **F5 London gate**: Confirm 07-11 UTC cab fills drop to zero in MT5 export.
-  Check `grep -c "session_gate\|LONDON" logs/cab_watcher.log`.
-- [ ] **204 fires**: `grep -c "GHOST_CACHE_FIRE" logs/sniper_hunter.log`.
-  Target: nonzero. If zero after Day 5 at N_LAYERS=2, escalate.
-- [ ] **F6 gate**: `grep -c "GHOST_ARM_BLOCKED_ST_LONG" logs/unified_runner.log`.
-- [ ] **Thread health**: `grep "Heartbeat OK" logs/unified_runner.log | tail -3`.
+### Daily monitoring
+- [x] **F15 gate**: 0 fires in W7 (DOWN_PROBE dormant — 1 arm in 832 all-time).
+      Gate is wired but dead code in practice. Falsified as B1b readiness signal.
+- [x] **202 volume check**: 178 fills Sep 1–3 (~59/day, unchanged vs W6),
+      0 fills Sep 4–5 (F6 suppressed all arming).
+- [x] **F5 London gate**: 0 CAB entries 07:00-11:59 UTC. Gate held.
+- [x] **204 fires**: 1 fire in W7 (Sep 2, -$2.72). 3 all-time.
+- [x] **Thread health**: 5 threads alive, 1,632 heartbeats, 0 circuit breaker
+      trips, 0 dead threads.
+- [x] **USTECm ST trades**: 80% WR, +$7.19 (n=5) — disable trigger NOT met.
 
-### End-of-Week 7 evaluations
-- [ ] **F15 effectiveness**: W7 202 WR > 44% (from W6 40.0%) OR avg/trade improves from -$0.43.
-  If not: gate may be helping on count but not per-trade quality.
-- [ ] **F5 effectiveness**: Zero cab_managed fills opening 07-11 UTC in W7.
-  If fills still appear: blocked_hours_utc change did not deploy.
-- [ ] **H15 stagnation decay**: Compute from W6+W7 CAB MT5 export.
-  Check % of CAB losses held 24h+ at R<0.5. If >30%: register for Phase C.
-- [ ] **H16 rollover gate**: Compute W6 CAB entry WR at 22-23 UTC.
-  If WR<30%: extend blocked_hours_utc to include 22,23 entering Week 8.
-- [ ] **F7 NY_CLOSE+H4_UP**: Evaluate combined n vs 140 threshold.
-- [ ] **USTECm disable**: If 3rd consecutive negative week with 5+ closed trades.
-- [ ] **Gate 2 — 204 vs 202**: If 204 accumulates 5+ fires, begin avg_R tracking.
+### End-of-week evaluations
+- [x] **F15 effect**: 168 closed fills, 45.2% WR, -$24.68. H4=DOWN
+      +$0.27/tr / H4=UP -$0.72/tr — signal INVERTED vs W6.
+- [x] **ATR threshold derivation**: all-time H4=UP quartiles (n=267) — best
+      bucket Q2 (1.33–1.74) = +$0.01/tr. No positive cohort. Gate DEFERRED.
+- [x] **F5 London effectiveness**: 0 CAB fills 07-11 UTC in W7 MT5 export.
+- [x] **H15**: CLOSED — 0.9% (1 of 115) W6+W7 losses open 24h+ at R<0.5.
+- [x] **H16**: CLOSED — 0 CAB entries at 22:00-23:59 UTC across W6+W7.
+- [x] **204 Gate 2**: 1 fire in W7 (-$2.72). 3 all-time, WR 66.7%, cum -$0.22.
+- [x] **ST Gate 5**: fit matrix updated. XAGUSDm -$6.09/tr (n=8) strong
+      drag; USTECm recovered (+$1.44/tr). Accumulating.
+- [x] **GHOST_ARM_BLOCKED_H4_DOWN total count**: 0 — DOWN_PROBE dormant.
+      Criterion retired; rely on H4 direction data instead.
+- [x] **Phase B1b readiness (critical):** RESOLVED — B1b DEFERRED Sep 5.
+      F15 fired 0 times in W7 (DOWN_PROBE dormant — 1 arm in 832 all-time).
+      H4 direction signal inverted W6→W7 (DOWN +$0.27/tr vs UP -$0.72/tr).
+      B1b would have hurt W7 by ~$27. New readiness criterion: H4=DOWN
+      avg < -$0.50/tr AND H4=UP avg > +$0.10/tr in BOTH W8 AND W9.
 
 ---
-## Week 6 COMPLETED (Aug 25–29)
-- [x] **N_LAYERS_DEFAULT = 2**: Applied in ghost_super/ghost_cache.py.
-  10/10 unit tests confirmed passing.
-- [x] **204 fires monitoring**: 1 fire Week 6. Gate 2 data started.
-- [x] **F6 gate effectiveness**: 0 fires W6 (regime gate blocked arming before F6 — confirmed not a dead wire).
-- [x] **H8 equity**: W6 close $6,867.54, week P&L -$109.96.
-- [x] **H9 CAB direction gate**: REFUTED — gap narrowed to 7.5pp in ranging conditions. No gate.
-- [x] **Cross-CAB comparison**: Completed. H13 invalidated, H14-H16 registered.
-- [x] **W6 data extraction and analysis**: Complete.
-- [x] **F5 London Open gate**: IMPLEMENTED Aug 31 2026. Cross-system evidence from 3 CAB variants.
-- [x] **F15 H4 direction gate**: IMPLEMENTED Aug 31 2026. Test T20 added, 20/20 passing.
 
-### Hypothesis tracking (Week 7 evaluation queue)
-- [ ] **H14 EMA50 bias filter**: Log EMA50 at every cab_super entry starting Week 7.
-  Two weeks of data before any gate decision. No gate until Week 9.
-- [ ] **H15 stagnation decay**: Compute from W6+W7 CAB MT5 export.
-  If >30% of losses held 24h+ at R<0.5: register for Phase C.
-- [ ] **H16 rollover gate**: Compute from W6 CAB audit entries at 22-23 UTC.
-  If WR<30%: extend blocked_hours_utc to include 22,23.
+## Sep 9 Completed Tasks — Audit Supplements Filed
 
-### End-of-Week 6 evaluations (completed)
-- [x] **Ghost 202 session gate confirmation**: LONDON confirmed negative across 3 systems.
-  n=341 cross-system, n=82 in-system. F5 London gate implemented.
-  NY_CLOSE+H4_UP: n=89 of 140 needed. ATR floor: n=134 of 195 needed.
-  ADX dead zone: insufficient n. Conviction: 37% WR in 20-40 bucket (above 35% threshold).
-- [x] **H9 CAB direction gate**: REFUTED. Gap narrowed to 7.5pp in ranging conditions.
-  Gate not implemented. H9 archived.
-- [x] **Gate 2 — 204 vs 202**: 204 had 1 fire in W6. 30+ fills each still needed.
-- [x] **SuperTrend Gate 5 accumulation**: Continue accumulating.
-- [x] **F6 effectiveness**: 0 fires W6 — regime gate blocked arming before F6.
-  Wiring confirmed in code review.
-- [x] **MPE publishing**: Confirmed operational. Audit CSV shows 140 distinct ADX values.
+### Level 2 Microstructure Assessment (Sep 9 2026)
+- [x] **Cross-bot lagging indicator audit completed**: Independent second-pass
+      audit (Buffy/Codebuff) assessed all four bots (CAB, SuperTrend, Ghost 202/204)
+      against OBI/CVD microstructure architecture. Key finding: all bots use
+      lagging indicators (RSI, ATR, ADX) for entries without order flow confirmation.
+      Segregated into immediate fixes (F-A1 through F-A6) and longer-term micro
+      architecture items.
+- [x] **F-A1 registered**: Adaptive ADX gate likely INERT — max adx_at_fill=39.43
+      and max conviction=59.75 across 30 days sit just under static thresholds
+      (40/60). read_adaptive_thresholds_hunter() returns hardcoded defaults.
+      is_adaptive flag and adaptive_thresholds_live.csv must be checked at next
+      log extraction. Status: VERIFICATION REQUIRED.
+- [x] **F-A2 registered (CRITICAL)**: h4_direction_at_arm column in ORDER_FILL_V51
+      contains FILL-TIME H4 direction, not ARM-TIME. _get_h4_direction() is called
+      inside send_order() at trigger time. True arm-time H4 exists only on ARMED
+      rows (not joined to fills). B1b trigger thresholds were measured on fill-time
+      H4 cohorts but B1b fires at arm time. W6/W7 H4 cohorts must be recomputed
+      from ARMED rows joined to fills by time proximity before B1b can be wired.
+- [x] **F-A3 registered**: Three session definitions coexist — ghost_sniper.get_session()
+      (ASIAN 21-8, LONDON 8-12, NY_OVERLAP 12-16, NY_CLOSE 16-21), MPE KR field
+      (ASIAN 0-6, LONDON 7-12, NY_OVERLAP 13-16, NY_CLOSE 17-20), RB002 research
+      (ASIAN 0-7, LONDON 7-12, NY_OVERLAP 12-17, NY_CLOSE 17-0). H22 evidence uses
+      get_session(); A016/A018 permutation tests used RB002 hours. MUST standardise
+      to get_session() as single definition and re-run A016/A018 under those hours
+      before H22 gate is designed.
+- [x] **F-A4 registered**: BE-lock threshold raised from 0.5R to 1.0R
+      (sniper_watcher.py BE_LOCK_R=1.0) without re-measuring against clean data.
+      W1 n=2,458 measurement was at BE_LOCK_R=0.5 with SL=0.2×ATR; both parameters
+      changed. No equivalent measurement exists at 1.0R with SL=0.35×ATR. Highest-value
+      unvalidated parameter change in the system.
+- [x] **F-A5 registered (doc fix only)**: Magic 204 does NOT share 202's trigger-time
+      gates (spread guard, fresh brain state, 204 fires from GhostCache update loop
+      before trigger check using arm-time context). MDP statement "204 fires under the
+      same conditions as 202" is incorrect. Must correct all documentation references.
+- [x] **F-A6 language reduced**: F6 "$85 drag avoided in W7" is single-week estimate
+      on Ghost's worst days. V2 (without F6) earned +$63.68 on same days. Replace
+      "sole effective Ghost drag-reducer" language with: "mechanistically validated
+      (n=34, 8pp WR drop) but single-week drag estimates are unreliable. Multi-week
+      series required before quantifying drag reduction."
+- [x] **Audit findings filed in roadmap.md**: F-A1 through F-A6 added to Section 3
+      hypotheses table with full status, evidence, and action required. H22 entry
+      updated with F-A3 precondition. Cross-referenced from todo_tracker.md.
 
 ---
 ### Knowledge Register Wiring (High Priority)
@@ -290,21 +397,137 @@
 
 - [ ] **Architectural Fix for 10016 SL Rejections (RESOLVED — Aug 8 2026)**: Option 2 (Phase 2 Dynamic SL) implemented in `ghost_super/ghost_sniper.py` `send_order()`. SL/TP anchor in Phase 2 now computed from `result.price` (actual fill price) rather than pre-order tick price. Eliminates geometric mismatch that caused 10016 rejections and downstream naked trade kill-switch terminations. Single-Phase entry (Option 1) was rejected because it would cause missed entries on 10016 rejection of the bundled order — worse outcome on a strategy that fires at precise probe retraction moments.
 
+## Week 8 Active Tasks (Sep 8–12 2026) — COMPLETED
+
+### W8 Completed (Sep 8–12 2026)
+- [x] H21 M5 logging confirmed active (29 lines, all fields present)
+- [x] Audit CSV unified-mode write path confirmed (141 W8 rows)
+- [x] F-A1 closed: adaptive gate static throughout W4–W8
+- [x] F-A2 closed: arm-time H4 discrepancy harmless (99.7% agreement)
+- [x] B1b permanently closed: three-regime inversion confirmed
+- [x] H22 redefined: NY_OVERLAP worst session, ASIAN not profitable
+- [x] Gate 5 LOCK_CANDIDATEs confirmed: XAUUSDm + BTCUSDm
+- [x] F14 XAGUSDm overturned: -$80.85 all-time
+- [x] Two-month retrospective completed: 7 targets, all produced
+- [x] CAB IMMEDIATE_EXIT deployed (cab_watcher.py)
+- [x] CAB REAPER simplified (cab_watcher.py)
+- [x] SuperTrend ENTRY_QUALITY logging deployed (supertrend_bot.py)
+- [x] CAB_ENTRY_QUALITY logging deployed (cab_entry.py)
+- [x] GHOST_FIRE_QUALITY logging deployed (ghost_sniper.py, unified_runner.py)
+
+## Week 9 Active Tasks (Sep 15–19 2026)
+
+### Code changes deployed entering W9
+- [x] CAB IMMEDIATE_EXIT rule (cab_watcher.py): exits losing trades within first 2 hours when R ≤ −0.20 and no prior actions taken. Logs: IMMEDIATE_EXIT|R{x}|held_{n}min
+- [x] CAB REAPER simplified (cab_watcher.py): removed 7-condition triple gate. New: R ≤ −0.50 AND last closed H4 bar against position direction. Bar-gated. Logs: REAPER|H4_AGAINST|R{x}
+- [x] SuperTrend ENTRY_QUALITY logging (supertrend_bot.py): cluster_spread, cluster_consensus, er_at_entry logged at every entry.
+- [x] CAB_ENTRY_QUALITY logging (cab_entry.py): h4_bar_position, m15_aligned_bars, nearest_swing_atr logged at every H4 inversion.
+- [x] GHOST_FIRE_QUALITY logging (ghost_sniper.py, unified_runner.py): committed_reversal_bars, trigger_bar_body_ratio logged at every Ghost trigger.
+
+### Daily monitoring W9
+- [x] IMMEDIATE_EXIT fires: conditions not met in W9 (no position hit −0.20R threshold)
+- [x] REAPER fires: conditions not met in W9 (no position hit −0.50R threshold)
+- [x] ENTRY_QUALITY logging: confirmed deployed in code (no ST entries during W9 review window)
+- [x] CAB_ENTRY_QUALITY: confirmed deployed in code (no new CAB entries during W9)
+- [x] GHOST_FIRE_QUALITY: confirmed in unified_runner.log (not sniper_hunter.log — routing clarified)
+- [x] Thread health: 71 heartbeats Sep 16–19, 0 circuit breaker trips
+- [x] XAGUSDm ST P&L: +$40.60 in W9 (+$6.77/tr, n=6). ESCALATED_WATCH removed.
+
+### End-of-week W9 evaluations
+- [x] H22-revised: CONFIRMED — NY_OVERLAP avg −$1.00/tr, n=14. Gate implemented entering W10.
+- [x] XAGUSDm disable decision: NOT DISABLED — W9 strongly positive (+$40.60)
+- [x] Gate 5 formal lock: XAUUSDm + BTCUSDm confirmed, no W9 regression
+- [x] IMMEDIATE_EXIT vs full-loss: conditions never met in W9 (code confirmed deployed)
+- [x] REAPER fires: conditions never met in W9 (code confirmed deployed)
+- [x] Entry quality data: GHOST_FIRE_QUALITY and CAB_ENTRY_QUALITY confirmed in correct log files; code deployed correctly
+- [x] Probe investigation: all Sep 12 features confirmed deployed; all zero-count results explained
+- [x] Audit CSV gap explained: Ghost blocked by F6 Sep 16–19; no events = no writes
+
+---
+
+## Week 10 Active Tasks (Sep 22–26 2026)
+
+### Code changes deployed entering W10
+- [x] H22 NY_OVERLAP gate: wired in unified_runner.py ghost_hunter_thread and ghost_sniper.py run_hunter(). Logs GHOST_ARM_BLOCKED_SESSION. Test T21 added, 21/21 passing.
+- [x] USTECm disabled: removed from config/config.json symbols section. Requires restart to take effect.
+
+### Daily monitoring W10
+- [ ] H22 gate firing: grep -c "GHOST_ARM_BLOCKED_SESSION" logs/unified_runner.log
+      Expected: nonzero on first day with fills during 12-16 UTC.
+      If zero after Day 3 with normal Ghost activity: wiring broken.
+- [ ] Ghost 202 fills: reduced volume expected vs prior weeks (NY_OVERLAP
+      was ~22% of fills). WR and avg P&L should improve.
+- [ ] USTECm absent: confirm magic 404213 not in startup symbol list in
+      logs/unified_runner.log after restart.
+- [ ] M5_CONTEXT: if new CAB entries fire this week, confirm M5_CONTEXT
+      appears in logs/cab_watcher.log.
+- [ ] IMMEDIATE_EXIT: any fires? Note R at fire and time held.
+- [ ] Thread health: grep "Heartbeat OK" logs/unified_runner.log | tail -3
+- [ ] XAGUSDm: track ST P&L daily. W9 reversal needs one more week to
+      confirm stability before removing from watch list entirely.
+
+### End-of-week W10 evaluations
+- [ ] Ghost 202: does avg P&L improve from −$0.26/tr (W9)? Target: positive
+      or materially less negative. Key question: does blocking NY_OVERLAP
+      move the remaining ASIAN+LONDON fills to net positive?
+- [ ] Gate 5 lock: XAUUSDm and BTCUSDm — any W10 regression?
+- [ ] CAB trajectory: is BUY WR recovering from 25.8%? Are IMMEDIATE_EXIT
+      or REAPER firing now that more data has accumulated?
+- [ ] H22 gate count: how many probes were blocked during 12-16 UTC?
+      Express as % of total ARM events.
+- [ ] Account equity direction: is the trajectory improving?
+
+### Known items to watch
+- [ ] Magic 201 shadow pipeline (broken): 828 log events, 0 audit rows.
+      Add to next code session agenda. Do not attempt mid-week.
+
+---
+
 ## Deferred / Parked Items
-- [ ] **H4 Directional Bias Gate on Probe Arming**: Block DOWN_PROBE arming when h4_direction=UP and UP_PROBE arming when h4_direction=DOWN. Deferred pending H2 confirmation from Week 4 data. If H2 confirmed, this becomes the first post-data-window mechanical change. Implementation target: `ghost_hunter_thread` in `unified_runner.py` and `run_hunter()` in `ghost_super/ghost_sniper.py` — add `_get_h4_direction()` check before any probe arming.
+- [ ] **P1 [BLOCKER — ACTIVE]:** SL geometry mismatch. Code: SCALP_REV_SL_ATR_MULT=0.35. Observed: median broker SL = 1.50×atr_at_fill. Hypothesis: 0.35 is applied to H1 ATR (0.35×H1 ≈ 2.67 ≈ observed 2.673). Resolve by grepping ghost_sniper.py for which copy_rates_from_pos timeframe feeds the SL calculation. Blocks BE-lock and ATR gate work.
+- [x] **H4 Directional Bias Gate on Probe Arming**: IMPLEMENTED as F15 Sep 1 2026.
+      Logs GHOST_ARM_BLOCKED_H4_DOWN. Only DOWN_PROBE gated.
+- [x] **Phase B1b (UP_PROBE gate when H4=DOWN)**: PERMANENTLY CLOSED Sep 12 2026.
+      H4 direction inverted in W6, W7, W8. No stable directional advantage
+      all-time. Do not re-evaluate.
+- [x] **Session filtering NY_CLOSE vs ASIAN**: RETIRED. F7 inverted W4→W6.
+      Session×H4 combinations are regime-specific, not structural.
+- [x] **H9 CAB H4 direction gate**: REFUTED Aug 30 2026. Gap narrowed to 7.5pp.
+      No gate implemented. H14 EMA50 bias filter registered as Phase B2
+      replacement hypothesis — requires 2 weeks of EMA50 logging before evaluation.
+- [ ] **H14 EMA50 bias filter (CAB)**: Log EMA50 at every CAB entry in
+      cab_watcher.log starting Week 7. Gate evaluation: earliest Week 9
+      after n≥60 logged fills with EMA50 field.
+- [x] **H15 stagnation decay**: CLOSED Sep 5 2026 — 0.9% of W6+W7 CAB
+      losses open 24h+ at R<0.5 (1 of 115). No pattern.
+- [x] **H16 rollover gate**: CLOSED Sep 5 2026 — 0 CAB entries at
+      22:00-23:59 UTC across W6+W7. Gate not needed.
+- [ ] **DOWN_PROBE BUY side**: F15 counter cannot accumulate (1 DOWN_PROBE
+      arm in 832 events — gate is dead code in practice). Rely on H4
+      direction data consistency instead. Earliest activation: Week 11.
+- [ ] **Magic 201 audit CSV write fix (code task, registered Sep 5 2026)**:
+      828 VIRTUAL_FILL events logged, zero audit CSV rows. is_shadow=True
+      path in send_order() does not write to sniper_v51_live_audit.csv.
+      Must be fixed before any 201-based shadow research can be conducted
+      (shadow validation in Section 0.2 depends on virtual-fill tracking).
+- [ ] **H22-revised NY_OVERLAP gate [IMPLEMENTED W10]**: Gate wired in
+      unified_runner.py and ghost_sniper.py. Logs GHOST_ARM_BLOCKED_SESSION.
+      Test T21 added, 21/21 passing. Verify firing during 12-16 UTC window
+      in W10. Session definition: get_session() in ghost_sniper.py (canonical).
+- [ ] **USTECm removed from config.json**: Disable trigger met (3 consecutive
+      negative weeks). Removed from symbols section. Requires restart.
+      Monitor: confirm magic 404213 absent from startup symbol list.
+- [ ] **Entry Quality Score (Ghost)**: Phase C, requires 200+ post-F15 fills.
+- [ ] **Conviction gate**: Phase C. Requires n≥80 in Conv>50 bucket. Non-monotonic
+      in W6 — do not implement as binary threshold at <40 gate.
 - [ ] **BE-lock step ratchet**: Replace one-shot BE-lock with progressive step. Parked until SL changes are cleanly measured.
-- [ ] **Session filtering**: NY_CLOSE vs ASIAN. Parked until clean baseline is collected from the fully working system.
 - [ ] **Controlled grid-sizing / martingale**: Parked until grid tracking is confirmed perfectly functional.
 - [ ] **Market Exit Score (Phase 3)**: Replace static R-threshold exits with continuous 0-1 score (regime, conviction, ATR, momentum, OSI).
-- [ ] **H9 CAB H4 direction gate**: Implementation in cab_entry.py blocked
-  pending Week 6 confirmation. If confirmed: add _get_h4_direction(symbol)
-  to CABEntryEngine, gate bearish inversion entries when H4=UP.
-  Log CAB_SELL_BLOCKED_H4_UP. Does not touch exit logic or BUY entries.
 - [ ] **CAB MFE/MAE logging (Enhancement 4)**: Safe to add anytime.
-  TradeAnalyticsEngine already exists. Low priority — collect direction
-  gate data first.
+      TradeAnalyticsEngine already exists. Low priority — collect direction
+      gate data first.
 - [ ] **CAB enhancement spec**: Parked at Review Stage (Aug 22 2026).
-  Tri-vector ADX framework deferred indefinitely. Vol_Expansion_Ratio
-  gate deferred until ratio cross-referenced against trade outcomes.
-  H4 Macro Trend Filter concept absorbed into H9 with simpler
-  implementation path.
+      Tri-vector ADX framework deferred indefinitely. Vol_Expansion_Ratio
+      gate deferred until ratio cross-referenced against trade outcomes.
+      H4 Macro Trend Filter concept absorbed into H9 with simpler
+      implementation path.

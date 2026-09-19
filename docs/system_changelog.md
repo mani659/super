@@ -4,6 +4,47 @@ This timeline maintains a strict historical record of all code modifications, bu
 
 ---
 
+## September 9, 2026 — Research Control Audit & Supplement Integration
+
+### All Systems (Documentation Only — No Code Changes)
+
+- **GHOST_SNIPER_RESEARCH_CONTROL_AUDIT.md produced**
+  - Full source-level evidence control audit of the Ghost Sniper system.
+  - Key verified findings:
+    - Magic 201 fires as pure shadow (VIRTUAL_FILL, no MT5 order). Zero audit CSV rows from 201 confirmed by code path — is_shadow=True causes early return before log_event() is called.
+    - Magic 202 is the only real entry. Gate 202 evaluates ADX at trigger time (fresh read), not arm time.
+    - `_get_h4_direction()` is a 12-hour close-to-close slope proxy, not a structural trend classifier. Three intermediate H4 bars are ignored.
+    - W4→W6 inversions classified MIXED/CONFOUNDED (SL width change + MPE non-functionality during W4). W6→W7 H4 inversion classified LIKELY MARKET-STATE EFFECT (architecture identical between weeks).
+    - KR Layer 2 and Layer 3 hard blocks confirmed bypassed (RAW_LOGGING_MODE=True). All fill data collected with these bypassed.
+    - `[OOB]` in log lines confirmed: broker-side failsafe TP at 2R anchored. Does NOT mean TP was hit.
+    - `latency_ms` measures start-of-send_order() to Phase-1-fill only. Phase 2 (SLTP anchor) not included.
+    - Adaptive threshold `tf_conv_fire` confirmed dead — leg 203 removed but threshold still computed. No consumer.
+
+- **CONTROL_SESSION_AUDIT_SUPPLEMENT_SEP9.md received and integrated**
+  - Independent second-pass audit. Six new findings (F-A1 through F-A6) added to findings registry.
+  - F-A1: Adaptive ADX gate likely inert (static thresholds appear operational based on fill distribution).
+  - F-A2 (CRITICAL): h4_direction_at_arm in fill rows is fill-time H4, not arm-time. B1b trigger must be recomputed from ARMED rows.
+  - F-A3 (CRITICAL): Three session definitions coexist. get_session() standardised as canonical. H22 gate cannot be wired until permutation re-run under get_session() hours.
+  - F-A4: BE-lock 0.5R→1.0R change has no clean measurement at current parameters. Two-month retrospective will produce first measurement.
+  - F-A5: MDP documentation error corrected — 204 does not share 202's trigger-time gates. Code is correct by design; description was wrong.
+  - F-A6: F6 single-week drag estimate ($85, W7) noted as unreliable for magnitude. Mechanistic validation (n=34, 8pp WR drop) remains valid.
+  - Cross-bot CAB drill: OSI R-guard in cab_super confirmed as most validated exit component by cross-architecture evidence. Do not modify. USOILm flagged as only symbol with cross-bot convergence (negative in all three CAB architectures W7).
+
+- **L2 Integration Assessment completed**
+  - Ghost: Phase C only — OBI at probe arming as shadow logging, after H22 session gate is live.
+  - SuperTrend: Phase D only — CVD at entry to supplement tick-count volume gate.
+  - CAB: Phase C only — CVD at Harvester decision point as shadow logging.
+  - No L2 changes before Phase C.
+
+- **Two-Month Retrospective Analysis scheduled for Sep 12 2026**
+  - First full-period analysis covering W3–W8 (Jul 1 – Sep 12 2026).
+  - Seven analysis targets: Ghost session breakdown (H22), arm-time H4 cohort (F-A2), ST symbol fit matrix (Gate 5), CAB trajectory, BE-lock cohort at current parameters (F-A4), cross-bot equity attribution, adaptive gate verification (F-A1).
+
+See docs/GHOST_SNIPER_RESEARCH_CONTROL_AUDIT.md and
+docs/CONTROL_SESSION_AUDIT_SUPPLEMENT_SEP9.md for full audit evidence.
+
+---
+
 ## August 26, 2026 - Phase A Architecture Fix
 
 ### V1 System
