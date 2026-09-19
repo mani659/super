@@ -10,7 +10,20 @@ import logging
 logger = logging.getLogger("KnowledgeRegister")
 
 # Raw Logging Mode: Bypasses all risk filters and invalidations to allow edge validation
-RAW_LOGGING_MODE = False
+#
+# fix-parity-rawlogging (V1 -> V2 alignment, Sep 19 2026):
+# This was False in V2 while V1 (core/knowledge_register.py:12) runs True. Because
+# both books call the same two APIs -- is_entry_invalidated() and
+# check_portfolio_entry_allowed() -- from identical call sites, the flag decided
+# whether KR Layer 2 (entry invalidation bus) and Layer 3 (portfolio risk ceiling)
+# existed at all. V1 ran with both layers short-circuited to always-allow; V2 ran
+# with both armed. That made the two systems non-comparable as live books even
+# though every strategy-level threshold matched. Flipped to True to match V1.
+#
+# Consequence, stated plainly: V2 no longer blocks any entry on invalidation-bus
+# or portfolio-ceiling grounds. Entry counts may rise. Existing positions are
+# unaffected -- these two APIs guard NEW entries only.
+RAW_LOGGING_MODE = True
 
 class KnowledgeRegister:
     """
@@ -159,3 +172,102 @@ class KnowledgeRegister:
         """Returns all currently active theses."""
         with self._lock:
             return list(self._theses.values())
+
+    # -------------------------------------------------------------------
+    # LAYER 2: Thesis Invalidation Bus  (V1 parity port — core/knowledge_register.py)
+    # -------------------------------------------------------------------
+
+    def publish_invalidation(
+        self,
+        symbol: str,
+        direction: int,
+        source_bot: str,
+        reason: str,
+        ttl_seconds: float = 1800.0
+    ) -> None:
+        """
+        Publishes a macro structure change invalidating new entries in a direction.
+        direction: +1 invalidates BUY entries, -1 invalidates SELL entries.
+        Mirrors V1 core/knowledge_register.py publish_invalidation exactly.
+        """
+        now = time.time()
+        with self._lock:
+            self._invalidations[(symbol, direction)] = {
+                "symbol": symbol,
+                "direction": direction,
+                "source_bot": source_bot,
+                "reason": reason,
+                "timestamp": now,
+                "expiry": now + ttl_seconds,
+            }
+            logger.warning(
+                f"Invalidation published: [{symbol} dir={direction}] by {source_bot}. Reason: {reason}"
+            )
+
+    def is_entry_invalidated(self, symbol: str, direction: int):
+        """
+        Layer 2 HARD BLOCK check. Returns (True, reason) if new entries in
+        this direction are blocked across all bots. Mirrors V1 exactly.
+        """
+        if RAW_LOGGING_MODE:
+            return False, None
+        now = time.time()
+        with self._lock:
+            event = self._invalidations.get((symbol, direction))
+            if event:
+                if now <= event["expiry"]:
+                    return True, f"Blocked by {event['source_bot']}: {event['reason']}"
+                else:
+                    del self._invalidations[(symbol, direction)]
+            return False, None
+
+    # -------------------------------------------------------------------
+    # LAYER 3: Portfolio Exposure Ledger  (V1 parity port)
+    # -------------------------------------------------------------------
+
+    def check_portfolio_entry_allowed(
+        self,
+        symbol: str,
+        direction: int,
+        proposed_risk_pct: float,
+        account_equity: float
+    ):
+        """
+        Layer 3 HARD BLOCK check. Enforces cross-bot aggregate risk ceilings
+        and correlation bucket limits. Mirrors V1 exactly.
+        """
+        if RAW_LOGGING_MODE:
+            return True, None
+
+        invalidated, reason = self.is_entry_invalidated(symbol, direction)
+        if invalidated:
+            return False, f"Hard Block (Layer 2 Invalidation): {reason}"
+
+        with self._lock:
+            target_bucket = None
+            for bucket_name, symbols in self._correlation_buckets.items():
+                if symbol in symbols:
+                    target_bucket = bucket_name
+                    break
+
+            if not target_bucket:
+                return True, "Allowed (No correlation bucket restrictions applied)"
+
+            current_bucket_risk_pct = 0.0
+            for thesis in self._theses.values():
+                if thesis.symbol in self._correlation_buckets[target_bucket]:
+                    if thesis.fill_price > 0 and thesis.initial_sl > 0:
+                        sl_dist = abs(thesis.fill_price - thesis.initial_sl)
+                        estimated_risk_pct = (sl_dist / thesis.fill_price) * 100.0 * 0.1
+                        current_bucket_risk_pct += estimated_risk_pct
+                    else:
+                        current_bucket_risk_pct += 0.5
+
+            max_allowed = self._max_bucket_risk_pct.get(target_bucket, 5.0)
+            if (current_bucket_risk_pct + proposed_risk_pct) > max_allowed:
+                return False, (
+                    f"Hard Block (Layer 3 Portfolio Risk): Bucket [{target_bucket}] risk "
+                    f"would reach {current_bucket_risk_pct + proposed_risk_pct:.2f}%, "
+                    f"exceeding ceiling of {max_allowed:.2f}%."
+                )
+            return True, "Allowed (bucket risk within ceiling)"

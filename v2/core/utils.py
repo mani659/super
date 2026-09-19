@@ -1,5 +1,22 @@
 import MetaTrader5 as mt5
 
+# ── Per-symbol risk multipliers (fix-symbol-risk) ─────────────────────────────
+# Applied to V2 sizing only. Deliberately NOT placed in config/config.json, because
+# that file is shared with V1 (cab_super), which is frozen.
+# XAGUSDm is the worst-performing symbol in every CAB variant that trades it:
+#   cab_super CAB      -$4.03/trade  (worst of 11 symbols)
+#   V2 CAB inversion   -$6.10/trade  (worst; -$347.85 total = 127% of CAB's net loss)
+#   cab_multi_pair     -0.169R avg
+#   V2 SuperTrend      -$10.86/trade (worst; -$65.15 over 6 trades)
+# Halved pending a symbol-level review; restore to 1.0 only when an edge is shown.
+SYMBOL_RISK_MULTIPLIERS = {
+    "XAGUSDm": 0.5,
+}
+
+def symbol_risk_multiplier(symbol: str) -> float:
+    """Risk multiplier for a symbol. 1.0 when unlisted."""
+    return SYMBOL_RISK_MULTIPLIERS.get(symbol, 1.0)
+
 def calculate_dynamic_lot(
     gateway,
     symbol: str,
@@ -21,7 +38,8 @@ def calculate_dynamic_lot(
     if acc is None or sym is None:
         return 0.01
 
-    risk_money = acc.equity * (risk_percent / 100.0)
+    # fix-symbol-risk: per-symbol risk scaling (see SYMBOL_RISK_MULTIPLIERS).
+    risk_money = acc.equity * (risk_percent * symbol_risk_multiplier(symbol) / 100.0)
     sl_ticks = sl_dist_price / sym.trade_tick_size
     
     # Protect against divide-by-zero if tick size is anomalous

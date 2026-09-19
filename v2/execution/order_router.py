@@ -18,7 +18,9 @@ class OrderRouter:
         self.kr = kr
         
         # Hardcoded constraints (to be moved to config later)
-        self.max_global_positions = 15
+        # V1 parity: unified_runner MAX_GLOBAL_POSITIONS = 30. V2 used 15,
+        # which blocked entries earlier than V1 and drifted trade counts.
+        self.max_global_positions = 30
         self.assumed_risk_per_trade_pct = 1.0 
         
         # Raw Logging Mode: Bypasses all risk filters to allow edge validation
@@ -50,7 +52,13 @@ class OrderRouter:
         # 2. Layer 3: Correlation Bucket Check
         bucket = self.kr.get_bucket_for_symbol(signal.symbol)
         if bucket:
-            current_bucket_exposure = self._calculate_bucket_exposure(bucket, open_positions)
+            # fix-router-realrisk: exposure is measured from each position's own SL
+            # distance, not from a constant assumption (see _calculate_bucket_exposure).
+            _acct = self.gateway.account_info()
+            _equity = _acct.equity if _acct is not None else 0.0
+            current_bucket_exposure = self._calculate_bucket_exposure(
+                bucket, open_positions, _equity
+            )
             max_allowed_risk = self.kr.get_max_risk_for_bucket(bucket)
             
             proposed_total_risk = current_bucket_exposure + self.assumed_risk_per_trade_pct
@@ -65,17 +73,37 @@ class OrderRouter:
         logger.info(f"[ROUTER APPROVED] {signal.symbol} via {signal.bot_name}")
         return True
 
-    def _calculate_bucket_exposure(self, bucket: str, open_positions: tuple) -> float:
+    def _position_risk_pct(self, pos, equity: float) -> float:
         """
-        Calculates the active risk deployed in a specific correlation bucket.
-        For V2 performance, we assume a static 1.0% risk per open trade.
+        Real risk of one open position, as a percentage of equity, from its own SL.
+
+        fix-router-realrisk: the bucket check used to add a hardcoded 1.0% per open
+        trade no matter what that trade actually risked, so the Layer-3 veto was
+        measuring a constant rather than the book. With risk per 1R observed across
+        $4.44-$114.81 in the Sep-12 audit, the constant could under- or overstate a
+        bucket by roughly an order of magnitude — the veto either never fired or fired
+        on fiction. Falls back to the assumed constant only when risk is uncomputable.
         """
-        # We need the symbols that belong to this bucket
-        # We can reach into the KR's private dict, or better, we can just iterate positions and check their bucket
+        try:
+            if equity <= 0 or pos.volume <= 0:
+                return self.assumed_risk_per_trade_pct
+            risk_distance = abs(pos.price_open - pos.sl)
+            if risk_distance <= 0:
+                return self.assumed_risk_per_trade_pct
+            si = self.gateway.symbol_info(pos.symbol)
+            if si is None or si.point <= 0 or si.trade_tick_size <= 0:
+                return self.assumed_risk_per_trade_pct
+            point_value = si.trade_tick_value / (si.trade_tick_size / si.point)
+            risk_money = (risk_distance / si.point) * point_value * float(pos.volume)
+            return (risk_money / equity) * 100.0
+        except Exception:
+            return self.assumed_risk_per_trade_pct
+
+    def _calculate_bucket_exposure(self, bucket: str, open_positions: tuple,
+                                   equity: float = 0.0) -> float:
+        """Active risk deployed in one correlation bucket, in % of equity."""
         exposure = 0.0
         for pos in open_positions:
-            pos_bucket = self.kr.get_bucket_for_symbol(pos.symbol)
-            if pos_bucket == bucket:
-                exposure += self.assumed_risk_per_trade_pct
-                
+            if self.kr.get_bucket_for_symbol(pos.symbol) == bucket:
+                exposure += self._position_risk_pct(pos, equity)
         return exposure

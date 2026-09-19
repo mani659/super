@@ -24,8 +24,11 @@ class CABConfig:
     atr_multiplier: float = 1.0
     max_positions: int = 1
     max_spread_points: int = 400
+    # V1 parity: cab_super/cab_entry.py blocked_hours_utc = (0..11) —
+    # Asian + London window combined. V2 previously blocked only 0..6,
+    # which opened the London window and drifted trade counts from V1.
     session_gate_enabled: bool = True
-    blocked_hours_utc: tuple = (0, 1, 2, 3, 4, 5, 6)
+    blocked_hours_utc: tuple = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
     max_lot_demo_cap: Optional[float] = None
     max_fire_attempts_per_bar: int = 3
 
@@ -200,6 +203,26 @@ class CABBot:
         if len(my_pos) >= self.config.max_positions:
             return False
 
+        # ── KR Layer 2 & 3: Hard Blocks — V1 parity ──────────────────────
+        # cab_super/cab_entry.py checks is_entry_invalidated + portfolio
+        # entry allowance before every entry. V2 previously had neither.
+        kr_dir = 1 if is_bullish_inversion else -1
+        invalidated, inv_reason = self.kr.is_entry_invalidated(self.config.symbol, kr_dir)
+        if invalidated:
+            logger.info(f"Entry BLOCKED by KR Layer 2: {inv_reason}")
+            return False
+        acc = self.gateway.account_info()
+        equity = acc.equity if acc else 10000.0
+        allowed, p_reason = self.kr.check_portfolio_entry_allowed(
+            symbol=self.config.symbol,
+            direction=kr_dir,
+            proposed_risk_pct=self.config.risk_percent,
+            account_equity=equity
+        )
+        if not allowed:
+            logger.info(f"Entry BLOCKED by KR Layer 3: {p_reason}")
+            return False
+
         sl_dist = atr * self.config.atr_multiplier
         lot = self._calculate_lot(sl_dist)
         
@@ -223,6 +246,72 @@ class CABBot:
         sl = round(sl, sym.digits)
 
         self._fire_attempt_count += 1
+
+        # ── Sub-H4 structure context (LOGGING ONLY — never gates the entry) ──
+        # V1 parity (cab_super/cab_entry.run_cycle). Features available at entry time
+        # for the offline win/loss classifier. Wrapped in try/except: a failure here
+        # can never block the fire.
+        try:
+            # H4 bar position: how far through the current H4 bar are we?
+            # 0.0 = just opened, 1.0 = bar about to close
+            _last_h4_open = df["time"].iloc[-1]
+            h4_bar_open_time = int(_last_h4_open.timestamp()) \
+                if hasattr(_last_h4_open, "timestamp") else int(_last_h4_open)
+            time_into_bar = time.time() - h4_bar_open_time
+            h4_bar_position = min(max(time_into_bar / 14400.0, 0.0), 1.0)
+
+            # M15 alignment: how many of the last 3 completed M15 bars agree?
+            m15_rates = self.gateway.copy_rates_from_pos(
+                self.config.symbol, mt5.TIMEFRAME_M15, 1, 3
+            )
+            m15_aligned = 0
+            if m15_rates is not None and len(m15_rates) >= 3:
+                for bar in m15_rates:
+                    bar_bull = bar["close"] > bar["open"]
+                    if is_bullish_inversion and bar_bull:
+                        m15_aligned += 1
+                    elif is_bearish_inversion and not bar_bull:
+                        m15_aligned += 1
+
+            # Nearest M15 swing level, in ATR units
+            m15_swing_rates = self.gateway.copy_rates_from_pos(
+                self.config.symbol, mt5.TIMEFRAME_M15, 1, 20
+            )
+            atr_val = atr   # reuse the H4 ATR already fetched for SL sizing
+            nearest_swing_dist = 999.0
+            if m15_swing_rates is not None and len(m15_swing_rates) >= 3:
+                tick_now = self.gateway.symbol_info_tick(self.config.symbol)
+                current_price = (tick_now.ask if is_bullish_inversion else tick_now.bid)
+                for i in range(1, len(m15_swing_rates) - 1):
+                    if is_bullish_inversion:
+                        # Nearest swing HIGH above entry (resistance)
+                        if (m15_swing_rates[i]["high"] > m15_swing_rates[i-1]["high"]
+                                and m15_swing_rates[i]["high"] > m15_swing_rates[i+1]["high"]
+                                and m15_swing_rates[i]["high"] > current_price):
+                            dist = (m15_swing_rates[i]["high"] - current_price) \
+                                   / max(atr_val, 0.001)
+                            nearest_swing_dist = min(nearest_swing_dist, dist)
+                    else:
+                        # Nearest swing LOW below entry (support)
+                        if (m15_swing_rates[i]["low"] < m15_swing_rates[i-1]["low"]
+                                and m15_swing_rates[i]["low"] < m15_swing_rates[i+1]["low"]
+                                and m15_swing_rates[i]["low"] < current_price):
+                            dist = (current_price - m15_swing_rates[i]["low"]) \
+                                   / max(atr_val, 0.001)
+                            nearest_swing_dist = min(nearest_swing_dist, dist)
+
+            if nearest_swing_dist == 999.0:
+                nearest_swing_dist = -1.0   # no swing found in window
+
+            logger.info(
+                f"CAB_ENTRY_QUALITY | {self.config.symbol} | "
+                f"direction={'BUY' if is_bullish_inversion else 'SELL'} | "
+                f"h4_bar_pos={round(h4_bar_position, 3)} | "
+                f"m15_aligned={m15_aligned}/3 | "
+                f"nearest_swing_atr={round(nearest_swing_dist, 3)}"
+            )
+        except Exception as _eq_e:
+            logger.debug(f"CAB entry quality log error: {_eq_e}")
 
         ts = TradeSignal(
             symbol=self.config.symbol,

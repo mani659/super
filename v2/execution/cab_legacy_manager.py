@@ -29,7 +29,6 @@ Author: CAB Trader  |  Date: 30 August 2026
 import logging
 import time
 import math
-from datetime import datetime
 from typing import Dict
 import MetaTrader5 as mt5
 import pandas as pd
@@ -49,8 +48,30 @@ GROUP_INVALIDATION_R = -1.5          # Per-symbol cascade exit
 HARVESTER_PARTIAL_FRAC = 0.50        # Close this fraction at 2R
 HARVESTER_TRAIL_ATR    = 1.5         # Trail remainder with N x M15 ATR
 
-# cw-reaper: Asian session hours (UTC) — suppress REAPER on XAUUSD
-REAPER_ASIAN_SUPPRESS_HOURS = (0, 1, 2, 3, 4, 5, 6)  # 00:00-06:59 UTC
+# NOTE: the Asian-session REAPER suppression was removed along with the old
+# 7-condition REAPER gate (see manage_fluid_logic). That suppression defended against
+# OSI false positives during thin hours; REAPER is a structural exit, not an OSI, so
+# it now fires in any session. The constant is gone rather than left dangling.
+
+# V1 parity — cab_watcher._get_symbol_config(): per-symbol fluid-matrix
+# thresholds come from config.json (cab_be_gate_r / cab_partial_r /
+# cab_lock_gate_r). The flat constants above are only the fallback defaults.
+_CONFIG_CACHE: dict = {}
+
+
+def _get_symbol_config(symbol: str) -> dict:
+    if symbol in _CONFIG_CACHE:
+        return _CONFIG_CACHE[symbol]
+    try:
+        import json
+        from pathlib import Path
+        cfg_path = Path(__file__).parent.parent.parent / "config" / "config.json"
+        with open(cfg_path, encoding="utf-8") as f:
+            data = json.load(f)
+        _CONFIG_CACHE[symbol] = data.get("symbols", {}).get(symbol, {}).get("cab_entry", {})
+    except Exception:
+        _CONFIG_CACHE[symbol] = {}
+    return _CONFIG_CACHE[symbol]
 
 
 class CABLegacyManager:
@@ -210,29 +231,70 @@ class CABLegacyManager:
             return False
 
     # ==========================================================================
-    # MICRO DEGRADATION (for Reaper)
+    # M5 CONTEXT HELPER (H21 parity)
     # ==========================================================================
-    def get_micro_degradation(self, ticket: int, current_price: float, current_atr: float, thesis) -> Dict[str, float]:
-        time_held_hours = max((time.time() - thesis.timestamp) / 3600.0, 0.01)
-
-        if thesis.direction == 1:
-            price_diff = current_price - thesis.fill_price
-        else:
-            price_diff = thesis.fill_price - current_price
-
-        initial_risk = abs(thesis.fill_price - thesis.initial_sl)
-        if initial_risk <= 0:
-            initial_risk = current_atr * 1.5
-
-        r_multiple = price_diff / initial_risk
-        r_velocity = r_multiple / time_held_hours
-        decay_factor = max(0.0, (time_held_hours / 12.0) - max(0.0, r_multiple))
-
-        return {
-            "r_multiple": round(r_multiple, 4),
-            "r_velocity": round(r_velocity, 4),
-            "decay_factor": round(decay_factor, 4)
+    def _get_m5_context(self, symbol: str, is_buy: bool) -> dict:
+        """
+        V1 parity (cab_watcher._get_m5_context). V1 logs M5 context the first time a
+        position is seen; V2 had no equivalent, so the H21 dataset contains no V2 rows
+        and V2 could not be compared against V1 on that axis. Same four fields, same
+        safe defaults, same never-raise contract.
+        """
+        defaults = {
+            "m5_close_direction": "UNKNOWN",
+            "m5_atr": 0.0,
+            "m5_body_ratio": 0.0,
+            "m5_bars_in_direction": 0,
         }
+        try:
+            # Last closed M5 bar — index 1, count 1
+            last_bar = self.gateway.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 1, 1)
+            if last_bar is None or len(last_bar) == 0:
+                return defaults
+
+            bar = last_bar[0]
+            close_dir = "UP" if bar["close"] > bar["open"] else "DOWN"
+
+            bar_range = max(float(bar["high"]) - float(bar["low"]), 0.0001)
+            body = abs(float(bar["close"]) - float(bar["open"]))
+            body_ratio = round(min(body / bar_range, 1.0), 3)
+
+            # ATR(14) over the last 20 M5 bars
+            m5_atr = 0.0
+            rates_20 = self.gateway.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 20)
+            if rates_20 is not None and len(rates_20) >= 15:
+                df = pd.DataFrame(rates_20)
+                df["tr"] = pd.concat([
+                    df["high"] - df["low"],
+                    (df["high"] - df["close"].shift(1)).abs(),
+                    (df["low"] - df["close"].shift(1)).abs(),
+                ], axis=1).max(axis=1)
+                atr_val = df["tr"].rolling(14).mean().iloc[-1]
+                if not pd.isna(atr_val):
+                    m5_atr = round(float(atr_val), 5)
+
+            # Consecutive closed M5 bars in the entry direction
+            streak_bars = self.gateway.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 1, 10)
+            m5_bars_in_dir = 0
+            if streak_bars is not None and len(streak_bars) > 0:
+                for bar_s in reversed(streak_bars):
+                    bar_bullish = bar_s["close"] > bar_s["open"]
+                    if is_buy and bar_bullish:
+                        m5_bars_in_dir += 1
+                    elif not is_buy and not bar_bullish:
+                        m5_bars_in_dir += 1
+                    else:
+                        break
+
+            return {
+                "m5_close_direction": close_dir,
+                "m5_atr": m5_atr,
+                "m5_body_ratio": body_ratio,
+                "m5_bars_in_direction": m5_bars_in_dir,
+            }
+        except Exception as e:
+            logger.debug(f"_get_m5_context error for {symbol}: {e}")
+            return defaults
 
     # ==========================================================================
     # OSI DETECTION (from V1 with bar-time guard)
@@ -293,7 +355,8 @@ class CABLegacyManager:
         using the full production-calibrated decision hierarchy:
           1. Group Invalidation (per-symbol R cascade)
           2. OSI (on H4 bar close)
-          3. Reaper (on H4 bar close, trending only)
+          3. Reaper (on H4 bar close: R <= -0.5R and the last closed H4 bar
+             closed against the position — no regime or degradation filter)
           4. Protector (every cycle)
           5. Lock Gate (every cycle)
           6. Continuous SL Tightening (every cycle, live tick)
@@ -369,11 +432,38 @@ class CABLegacyManager:
 
             if pos.ticket not in self.processed_actions:
                 self.processed_actions[pos.ticket] = set()
+                # H21 parity: log M5 context at first detection of this position.
+                try:
+                    _is_buy_for_m5 = (pos.type == 0)
+                    m5_ctx = self._get_m5_context(pos.symbol, _is_buy_for_m5)
+                    logger.info(
+                        f"M5_CONTEXT #{pos.ticket} | "
+                        f"symbol={pos.symbol} | "
+                        f"entry_dir={'BUY' if _is_buy_for_m5 else 'SELL'} | "
+                        f"m5_dir={m5_ctx['m5_close_direction']} | "
+                        f"m5_atr={m5_ctx['m5_atr']:.5f} | "
+                        f"m5_body={m5_ctx['m5_body_ratio']:.3f} | "
+                        f"m5_bars_in_dir={m5_ctx['m5_bars_in_direction']}"
+                    )
+                except Exception as _m5e:
+                    logger.debug(f"M5_CONTEXT log error: {_m5e}")
 
             if pos.sl == 0:
                 continue
 
             done = self.processed_actions[pos.ticket]
+
+            # -- V1 parity: per-symbol thresholds (cab_watcher.py) ---------------
+            #   protector_r = sym_cfg.get("cab_be_gate_r", PROTECTOR_R)
+            #   harvester_r = sym_cfg.get("cab_partial_r", HARVESTER_R)
+            #   lock_gate_r = sym_cfg.get("cab_lock_gate_r", protector_r + 0.5)
+            #   reaper_r    = REAPER_R (fixed 0.5)
+            sym_cfg = _get_symbol_config(pos.symbol)
+            protector_r = sym_cfg.get("cab_be_gate_r", PROTECTOR_R)
+            harvester_r = sym_cfg.get("cab_partial_r", HARVESTER_R)
+            lock_gate_r = sym_cfg.get("cab_lock_gate_r", protector_r + 0.5)
+            # NOTE: `reaper_r` was removed — the simplified REAPER uses the fixed
+            # -0.50R threshold inline, matching V1's post-fix implementation.
 
             # -- R calculation (price-distance method) ---------------------------
             is_buy = (pos.type == 0)
@@ -394,6 +484,34 @@ class CABLegacyManager:
                 f"Regime={regime} | "
                 f"Done={done}"
             )
+
+            # -- IMMEDIATE EXIT: trade moving wrong direction in first 2 hours -----
+            # V1 parity (cab_watcher.manage_fluid_logic). Fires only on a fresh trade
+            # with no actions recorded, inside the first 2 hours, once it is 0.2R
+            # against us: the entry thesis never confirmed, so exit before the loss
+            # compounds instead of waiting for OSI or a full stop. The `not done`
+            # guard means a trade that already reached PROTECTOR is never touched
+            # here — that case belongs to CONT_TIGHTEN.
+            if (not done
+                    and current_r <= -0.20
+                    and "IMMEDIATE_EXIT" not in done):
+                try:
+                    time_held_seconds = time.time() - pos.time
+                    if time_held_seconds < 7200:
+                        if self._close_position_cab(
+                            pos,
+                            f"IMMEDIATE_EXIT|R{current_r:+.2f}|held_{int(time_held_seconds/60)}min"
+                        ):
+                            done.add("IMMEDIATE_EXIT")
+                            logger.warning(
+                                f"  * IMMEDIATE_EXIT #{pos.ticket} | "
+                                f"R={current_r:+.2f} | "
+                                f"held={int(time_held_seconds/60)}min | "
+                                f"thesis not confirmed"
+                            )
+                            continue
+                except Exception as _e:
+                    logger.debug(f"IMMEDIATE_EXIT check error: {_e}")
 
             # -- MACRO GATE: OSI & REAPER (H4 bar close only) --------------------
             bar_time = intel.get("source_bar_time", 0)
@@ -428,43 +546,56 @@ class CABLegacyManager:
                                 done.add("OSI")
                                 continue
 
-                # Reaper: Dual-Vector Reaper (trending only)
+                # -- REAPER: exit losing trade when H4 structure turns against it ---
+                # V1 parity (cab_watcher). Replaces the old 7-condition triple gate —
+                # regime == TRENDING AND KR micro-degradation > 0.25 AND not Asian-
+                # suppressed — which over W3-W8 fired zero times in 488 CAB trades
+                # because regime rarely reads TRENDING and the remaining filters sat on
+                # top of that. Two conditions only: R in loss territory, and the last
+                # closed H4 bar closed against the position. Still bar-gated so it
+                # cannot thrash, and still excluded once PROTECTOR has fired.
                 if (
-                    regime == "TRENDING"
-                    and current_r <= -REAPER_R
+                    is_new_h4_bar
+                    and current_r <= -0.50
                     and "REAPER" not in done
                     and "PROTECTOR" not in done
+                    and "IMMEDIATE_EXIT" not in done
                 ):
-                    degrad = self.get_micro_degradation(
-                        pos.ticket, pos.price_current, m15_atr, thesis
-                    ) if thesis else {"decay_factor": 0.0}
-                    is_degrading = (degrad["decay_factor"] > 0.25)
-                    asian_suppressed = (
-                        pos.symbol in ("XAUUSDm", "XAUUSD.x")
-                        and datetime.utcnow().hour in REAPER_ASIAN_SUPPRESS_HOURS
-                    )
-
-                    if is_degrading and not asian_suppressed:
-                        if self._close_position_cab(
-                            pos, f"REAPER|Macro=TREND_AGAINST|Micro=DEGRADING"
-                        ):
-                            done.add("REAPER")
-                            logger.warning(
-                                f"  * REAPER FIRED #{pos.ticket} | "
-                                f"R={current_r:+.2f} | Vector=DEGRADING"
-                            )
-                            continue
-                    else:
-                        suppress_reason = (
-                            "ASIAN_SESSION" if asian_suppressed
-                            else "MICRO_VECTOR_HEALTHY"
+                    try:
+                        h4_rates = self.gateway.copy_rates_from_pos(
+                            pos.symbol, mt5.TIMEFRAME_H4, 0, 3
                         )
-                        logger.info(f"  REAPER BLOCKED #{pos.ticket} | R={current_r:+.2f} | {suppress_reason}")
+                        if h4_rates is not None and len(h4_rates) >= 2:
+                            last_bar = h4_rates[-2]   # last CLOSED H4 bar
+                            bar_bullish = last_bar["close"] > last_bar["open"]
+                            h4_against = ((is_buy and not bar_bullish)
+                                          or (not is_buy and bar_bullish))
+
+                            if h4_against:
+                                if self._close_position_cab(
+                                    pos, f"REAPER|H4_AGAINST|R{current_r:+.2f}"
+                                ):
+                                    done.add("REAPER")
+                                    logger.warning(
+                                        f"  * REAPER FIRED #{pos.ticket} | "
+                                        f"R={current_r:+.2f} | "
+                                        f"H4 closed against position | "
+                                        f"bar_bullish={bar_bullish} is_buy={is_buy}"
+                                    )
+                                    continue
+                            else:
+                                logger.debug(
+                                    f"  REAPER HELD #{pos.ticket} | "
+                                    f"R={current_r:+.2f} | "
+                                    f"H4 bar direction still WITH position"
+                                )
+                    except Exception as _e:
+                        logger.debug(f"REAPER H4 check error: {_e}")
 
                 self._last_macro_bar_time[pos.symbol] = bar_time
 
-            # -- PROTECTOR (V1 threshold: 1.2R) ----------------------------------
-            if current_r >= PROTECTOR_R and "PROTECTOR" not in done:
+            # -- PROTECTOR (V1 threshold: per-symbol cab_be_gate_r, default 1.2R)
+            if current_r >= protector_r and "PROTECTOR" not in done:
                 buffer = m15_atr * 0.15
                 new_sl = (pos.price_open + buffer) if is_buy else (pos.price_open - buffer)
                 sym_info = self.gateway.symbol_info(pos.symbol)
@@ -475,8 +606,7 @@ class CABLegacyManager:
                         f"R={current_r:+.2f} | New SL={new_sl:.5f} | Buffer={buffer:.5f}"
                     )
 
-            # -- LOCK GATE (V1: protector_r + 0.5 = 1.7R) -----------------------
-            lock_gate_r = PROTECTOR_R + 0.5
+            # -- LOCK GATE (V1: per-symbol cab_lock_gate_r, default protector+0.5)
             if current_r >= lock_gate_r and "LOCK_GATE" not in done:
                 buffer = m15_atr * 0.5
                 new_sl = (pos.price_open + buffer) if is_buy else (pos.price_open - buffer)
@@ -509,9 +639,9 @@ class CABLegacyManager:
                     sym_info = self.gateway.symbol_info(pos.symbol)
                     self.tm._modify_sl(pos, new_sl, sym_info.digits if sym_info else 3, "CONT_TIGHTEN")
 
-            # -- PARTIAL HARVESTER (V1: 50% close at 2R + trail remainder) -------
+            # -- PARTIAL HARVESTER (V1: 50% close at cab_partial_r + trail) ------
             if (
-                current_r >= HARVESTER_R
+                current_r >= harvester_r
                 and "HARVESTER" not in done
                 and live_tick
                 and live_price
