@@ -658,6 +658,21 @@ def ghost_hunter_thread(gateway: MT5Gateway, shared: SharedState,
                         stop.wait(GHOST_INTERVAL)
                         continue
 
+                    # H22 NY_OVERLAP session gate: block all probe arming during NY_OVERLAP
+                    # Evidence: three consecutive weeks avg P&L < -$0.68/tr, n>=10 each week
+                    try:
+                        _current_session = gh.get_session()
+                    except Exception:
+                        _current_session = "UNKNOWN"
+                    if _current_session == "NY_OVERLAP":
+                        log.info(
+                            f"GHOST_ARM_BLOCKED_SESSION | "
+                            f"session={_current_session} | "
+                            f"price={round(current_price,3)} — probe arming suppressed"
+                        )
+                        stop.wait(GHOST_INTERVAL)
+                        continue
+
                     if current_price > recent_high:
                         armed, probe_extreme = "UP_PROBE", current_price
                         break_level = current_price - dynamic_step
@@ -742,6 +757,47 @@ def ghost_hunter_thread(gateway: MT5Gateway, shared: SharedState,
                                               virtual_layer_depth=gc_signal["virtual_layer_depth"])
 
                     if trigger:
+                        # -- M1 retrace structure at fire (LOGGING ONLY) ------
+                        # Deliberately placed BEFORE the spread / daily-cap /
+                        # circuit-breaker guards so quality is captured even on
+                        # blocked fires. Features for the offline win/loss
+                        # classifier; try/except keeps it out of the fire path.
+                        try:
+                            _retrace_rates = gh._api().copy_rates_from_pos(
+                                gh.SYMBOL, mt5.TIMEFRAME_M1, 0, 5
+                            )
+                            committed_bars = 0
+                            retrace_body_ratio = 0.0
+                            if _retrace_rates is not None and len(_retrace_rates) >= 2:
+                                # Direction of retrace: UP_PROBE fires SELL, so reversal bars
+                                # are bearish (close < open). DOWN_PROBE fires BUY, reversal bars bullish.
+                                for _bar in _retrace_rates[-3:]:
+                                    _bar_bull = _bar["close"] > _bar["open"]
+                                    _bar_range = max(_bar["high"] - _bar["low"], 0.0001)
+                                    _bar_body = abs(_bar["close"] - _bar["open"])
+                                    _body_ratio = _bar_body / _bar_range
+
+                                    if armed == "UP_PROBE" and not _bar_bull and _body_ratio > 0.35:
+                                        committed_bars += 1
+                                    elif armed == "DOWN_PROBE" and _bar_bull and _body_ratio > 0.35:
+                                        committed_bars += 1
+
+                                # Body ratio of the triggering bar (most recent completed)
+                                _last = _retrace_rates[-2]
+                                _last_range = max(_last["high"] - _last["low"], 0.0001)
+                                retrace_body_ratio = abs(_last["close"] - _last["open"]) / _last_range
+
+                            log.info(
+                                f"GHOST_FIRE_QUALITY | {armed} | "
+                                f"committed_reversal_bars={committed_bars}/3 | "
+                                f"trigger_bar_body_ratio={retrace_body_ratio:.3f} | "
+                                f"atr={round(atr,5)} | "
+                                f"conviction={round(float(bs.get('conviction', 50)),1)} | "
+                                f"adx={round(float(bs.get('adx', 0)),2)}"
+                            )
+                        except Exception as _gq:
+                            log.debug(f"Ghost fire quality log error: {_gq}")
+
                         if spread > gh.SPREAD_MAX and not demo:
                             log.info(f"SKIP_SPREAD spread={spread:.3f}")
                             log_session_event("ghost", "SKIP_SPREAD",

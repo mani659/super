@@ -551,6 +551,87 @@ class CABEntryEngine:
 
         self._fire_attempt_count += 1
 
+        # ── Sub-H4 structure context (LOGGING ONLY — never gates the entry) ──
+        # Features available at entry time for the offline win/loss classifier.
+        # Wrapped in try/except: a failure here can never block the fire.
+        _eq_context = {}
+        try:
+            # H4 bar position: how far through the current H4 bar are we?
+            # 0.0 = just opened, 1.0 = bar about to close
+            h4_bar_open_time = int(df["time"].iloc[-1].timestamp()) \
+                if hasattr(df["time"].iloc[-1], "timestamp") \
+                else int(df["time"].iloc[-1])
+            import time as _time_mod
+            time_into_bar = _time_mod.time() - h4_bar_open_time
+            h4_bar_position = min(max(time_into_bar / 14400.0, 0.0), 1.0)
+
+            # M15 alignment: how many of last 3 completed M15 bars align
+            # with the entry direction?
+            m15_rates = self._api.copy_rates_from_pos(
+                self.config.symbol, mt5.TIMEFRAME_M15, 1, 3
+            )
+            m15_aligned = 0
+            if m15_rates is not None and len(m15_rates) >= 3:
+                for bar in m15_rates:
+                    bar_bull = bar["close"] > bar["open"]
+                    if is_bullish_inversion and bar_bull:
+                        m15_aligned += 1
+                    elif is_bearish_inversion and not bar_bull:
+                        m15_aligned += 1
+
+            # Nearest M15 swing level distance in ATR units
+            # Swing high: bar[i].high > bar[i-1].high AND bar[i].high > bar[i+1].high
+            m15_swing_rates = self._api.copy_rates_from_pos(
+                self.config.symbol, mt5.TIMEFRAME_M15, 1, 20
+            )
+            # Reuse the H4 ATR already fetched for SL sizing above (same value,
+            # avoids a second KnowledgeRegister snapshot read per fire).
+            atr_val = atr
+            nearest_swing_dist = 999.0
+            if m15_swing_rates is not None and len(m15_swing_rates) >= 3:
+                # Fetch the tick once, then pick the side we enter on
+                tick_now = self._api.symbol_info_tick(self.config.symbol)
+                current_price = (tick_now.ask if is_bullish_inversion
+                                 else tick_now.bid)
+
+                for i in range(1, len(m15_swing_rates) - 1):
+                    if is_bullish_inversion:
+                        # Nearest swing HIGH above entry (resistance)
+                        if (m15_swing_rates[i]["high"] > m15_swing_rates[i-1]["high"]
+                                and m15_swing_rates[i]["high"] > m15_swing_rates[i+1]["high"]
+                                and m15_swing_rates[i]["high"] > current_price):
+                            dist = (m15_swing_rates[i]["high"] - current_price) \
+                                   / max(atr_val, 0.001)
+                            nearest_swing_dist = min(nearest_swing_dist, dist)
+                    else:
+                        # Nearest swing LOW below entry (support)
+                        if (m15_swing_rates[i]["low"] < m15_swing_rates[i-1]["low"]
+                                and m15_swing_rates[i]["low"] < m15_swing_rates[i+1]["low"]
+                                and m15_swing_rates[i]["low"] < current_price):
+                            dist = (current_price - m15_swing_rates[i]["low"]) \
+                                   / max(atr_val, 0.001)
+                            nearest_swing_dist = min(nearest_swing_dist, dist)
+
+            if nearest_swing_dist == 999.0:
+                nearest_swing_dist = -1.0  # no swing found in window
+
+            _eq_context = {
+                "h4_bar_position": round(h4_bar_position, 3),
+                "m15_aligned_bars": m15_aligned,
+                "nearest_swing_atr": round(nearest_swing_dist, 3),
+            }
+
+            self.logger.info(
+                f"CAB_ENTRY_QUALITY | {self.config.symbol} | "
+                f"direction={'BUY' if is_bullish_inversion else 'SELL'} | "
+                f"h4_bar_pos={_eq_context['h4_bar_position']} | "
+                f"m15_aligned={_eq_context['m15_aligned_bars']}/3 | "
+                f"nearest_swing_atr={_eq_context['nearest_swing_atr']}"
+            )
+        except Exception as _eq_e:
+            self.logger.debug(f"CAB entry quality log error: {_eq_e}")
+            _eq_context = {}
+
         if is_bullish_inversion:
             sl = tick.bid - sl_dist
             ticket = self._place_order(is_buy=True,  sl=sl, lot=lot)

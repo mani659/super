@@ -85,6 +85,7 @@ def _api():
 TERMINAL_PATH    = r"C:\Program Files\MetaTrader 5 EXNESS - Copy\terminal64.exe"
 SYMBOL           = "XAUUSDm"
 SNIPER_MAGICS    = [201, 202]
+_kr_cache        = None  # cached KnowledgeRegister singleton
 
 BRAIN_LOG_FILE             = "sniper_brain.log"
 CONVICTION_LOG_FILE        = "sniper_conviction_log.csv"
@@ -240,11 +241,13 @@ def get_market_state():
     ATR timeframe mismatches and triplicated ADX calculations.
     Retains M1 body momentum for fast scalping conviction.
     """
-    from core.knowledge_register import KnowledgeRegister
-    kr = KnowledgeRegister()
+    global _kr_cache
+    if _kr_cache is None:
+        from core.knowledge_register import KnowledgeRegister
+        _kr_cache = KnowledgeRegister()
     
     # Layer 0 Structural Facts (M15 context for M1 scalper)
-    snapshot = kr.get_market_state(SYMBOL, "M15")
+    snapshot = _kr_cache.get_market_state(SYMBOL, "M15")
     
     if snapshot is None:
         return 50.0, 0.0, 0.0, "UNKNOWN"
@@ -449,6 +452,8 @@ def _set_leg_tp(pos) -> bool:
             logger.warning(f"LEG_TP: ticket={pos.ticket} has no SL - cannot set TP")
             _no_sl_warned.add(pos.ticket)
         return False
+    if pos.ticket in _be_locked_tickets:
+        return False
 
     own_risk = abs(pos.price_open - pos.sl)
     if own_risk <= 0:
@@ -491,9 +496,12 @@ def _set_leg_tp(pos) -> bool:
     if pos.tp == tp:
         return False
         
-    # Check if existing SL is blocking modification (10016)
+    # Check if existing SL or TP is inside broker stops_level (10016)
     if sl != 0 and abs(sl - curr_price) < stops_dist:
         logger.debug(f"LEG_TP DEFERRED: ticket={pos.ticket} SL ({sl}) is inside stops_level ({stops_dist})")
+        return False
+    if abs(tp - curr_price) < stops_dist:
+        logger.debug(f"LEG_TP DEFERRED: ticket={pos.ticket} TP ({tp}) is inside stops_level ({stops_dist})")
         return False
 
     req = {
@@ -636,8 +644,9 @@ def _send_modify(pos, new_sl):
                 f"modify_sl: SL inside stops_level for #{pos.ticket} "
                 f"— widened to {new_sl:.5f}"
             )
-    rounded_new_sl = round(new_sl, 3)
-    if rounded_new_sl == round(pos.sl, 3):
+    digits = sym_info.digits if sym_info else 3
+    rounded_new_sl = round(new_sl, digits)
+    if rounded_new_sl == round(pos.sl, digits):
         return None
 
     req = {
@@ -803,8 +812,8 @@ def _close_market(pos, exit_reason):
                 magic=pos.magic,
             )
         
-        from core.knowledge_register import KnowledgeRegister
-        KnowledgeRegister().unregister_trade_thesis(pos.ticket)
+        if _kr_cache is not None:
+            _kr_cache.unregister_trade_thesis(pos.ticket)
         
         # MAE/MFE Trade Excursion Logging
         try:
@@ -1236,6 +1245,7 @@ def run_brain():
 
     heartbeat_time     = 0
     conv_log_idle_time = 0
+    calibration_time   = 0
 
     while True:
         try:
@@ -1247,9 +1257,12 @@ def run_brain():
                     f"HB | conviction={round(conviction,1)} "
                     f"adx={round(adx,2)} regime={regime}"
                 )
-                # Removed write_brain_state: ghost_sniper now pulls via function call
-                compute_adaptive_thresholds()   # recalibrate every heartbeat
                 heartbeat_time = time.time()
+
+            # ── Adaptive calibration (60s cadence — was 2s, wasted CSV parses) ──
+            if time.time() - calibration_time > 60:
+                compute_adaptive_thresholds()
+                calibration_time = time.time()
 
             # ── Idle conviction snapshot (30s cadence) ──────────────────
             if time.time() - conv_log_idle_time > CONV_LOG_INTERVAL:

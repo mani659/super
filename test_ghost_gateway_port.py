@@ -282,6 +282,37 @@ class TestF6CrossBotGate(unittest.TestCase):
         del kr._theses[99999]
         print("T19 PASS  F6 gate detects ST LONG thesis on XAUUSDm")
 
+
+class TestH22NYOverlapGate(unittest.TestCase):
+    def test_21_h22_gate_blocks_arming_during_ny_overlap(self):
+        """
+        H22: probe arming is suppressed during NY_OVERLAP session.
+        Unit test checks the gate condition logic only.
+        """
+        # Simulate NY_OVERLAP: hour between 12 and 15 inclusive
+        for hour in [12, 13, 14, 15]:
+            from datetime import datetime
+            import unittest.mock as mock
+            with mock.patch('ghost_super.ghost_sniper.datetime') as mock_dt:
+                mock_dt.utcnow.return_value = datetime(2026, 9, 20, hour, 0, 0)
+                mock_dt.now = datetime.now
+                from ghost_super.ghost_sniper import get_session
+                self.assertEqual(get_session(), "NY_OVERLAP",
+                    f"Hour {hour} should be NY_OVERLAP")
+
+
+        # Confirm non-NY_OVERLAP hours are not blocked
+        for hour in [8, 10, 17, 21, 3]:
+            with mock.patch('ghost_super.ghost_sniper.datetime') as mock_dt:
+                mock_dt.utcnow.return_value = datetime(2026, 9, 20, hour, 0, 0)
+                mock_dt.now = datetime.now
+                from ghost_super.ghost_sniper import get_session
+                self.assertNotEqual(get_session(), "NY_OVERLAP",
+                    f"Hour {hour} should NOT be NY_OVERLAP")
+
+
+        print("T21 PASS  H22 NY_OVERLAP gate: hours 12-15 blocked, others free")
+
 if __name__ == "__main__":
 
 
@@ -297,11 +328,12 @@ if __name__ == "__main__":
         loader.loadTestsFromTestCase(TestGhostCache204Decouple),
         loader.loadTestsFromTestCase(TestF15DownProbeGate),
         loader.loadTestsFromTestCase(TestF6CrossBotGate),
+        loader.loadTestsFromTestCase(TestH22NYOverlapGate),
     ])
     result = unittest.TextTestRunner(verbosity=0).run(suite)
     print("=" * 55)
     if result.wasSuccessful():
-        print(f"ALL {result.testsRun}/20 PASS — pu-gh-port + Change 1 complete")
+        print(f"ALL {result.testsRun}/21 PASS — pu-gh-port + Change 1 complete")
     else:
         n = len(result.failures) + len(result.errors)
         print(f"{n} FAILURE(S)")

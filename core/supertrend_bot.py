@@ -178,6 +178,12 @@ class TradeContext:
     entry_volume_ratio:       float
     entry_atr:                float
 
+    # Entry-quality features (logging only — for offline win/loss classifier).
+    # Stored at entry because they cannot be reconstructed at close time.
+    entry_cluster_spread:     float = 0.0
+    entry_er_at_entry:        float = 0.0
+    entry_cluster_consensus:  float = 0.0
+
     state:             str = "INCUBATING"
     bars_in_decaying:  int = 0
 
@@ -1210,6 +1216,9 @@ class SuperTrendBot:
             "exit_reason": reason,
             "si_at_close": si,
             "er_at_close": er,
+            "entry_cluster_spread":    ctx.entry_cluster_spread if ctx else 0.0,
+            "entry_er_at_entry":       ctx.entry_er_at_entry if ctx else 0.0,
+            "entry_cluster_consensus": ctx.entry_cluster_consensus if ctx else 0.0,
             "exit_time":   datetime.now().isoformat(),
         })
 
@@ -1685,6 +1694,42 @@ class SuperTrendBot:
         sl_points = abs(ref_price - sl) / self._api.symbol_info(self.config.symbol).point
         volume    = self.calculate_position_size(sl_points)
 
+        # -- Entry quality context (LOGGING ONLY — never gates the entry) ------
+        # Features available at entry time for the offline win/loss classifier.
+        # Pre-seeded to 0.0 and computed inside try/except so a failure here can
+        # never block or alter the trade that follows.
+        cluster_spread    = 0.0
+        cluster_consensus = 0.0
+        er_at_entry       = 0.0
+        try:
+            # Cluster spread: separation between Best and Worst cluster performance.
+            # High spread = market clearly rewarding one sensitivity regime
+            perf_list = [st["vol_adj_perf"].iloc[-100:].mean()
+                         for st in supertrends.values()]
+            cluster_spread = float(max(perf_list) - min(perf_list)) if perf_list else 0.0
+
+            # Efficiency ratio at entry: how directional has price been?
+            # Uses _compute_efficiency_ratio() already on the bot
+            er_at_entry = self._compute_efficiency_ratio(df, bars=8)
+
+            # Cluster consensus: fraction of factor variants agreeing on direction
+            expected_trend_val = 1 if signal == 1 else 0
+            agreeing = sum(
+                1 for st in supertrends.values()
+                if int(st["trend"].iloc[-1]) == expected_trend_val
+            )
+            cluster_consensus = agreeing / max(len(supertrends), 1)
+
+            self.logger.info(
+                f"ENTRY_QUALITY | {self.config.symbol} | "
+                f"cluster_spread={cluster_spread:.4f} | "
+                f"cluster_consensus={cluster_consensus:.3f} | "
+                f"er_at_entry={er_at_entry:.3f} | "
+                f"direction={'BUY' if signal == 1 else 'SELL'}"
+            )
+        except Exception as _eq:
+            self.logger.debug(f"Entry quality log error: {_eq}")
+
         order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
         # place_order now fetches its own fresh tick internally
         ticket = self.place_order(order_type, volume, sl, tp)
@@ -1721,6 +1766,9 @@ class SuperTrendBot:
             entry_total_factors=len(supertrends),
             entry_volume_ratio=vol_ratio,
             entry_atr=current_atr,
+            entry_cluster_spread=cluster_spread,
+            entry_er_at_entry=er_at_entry,
+            entry_cluster_consensus=cluster_consensus,
         )
         self.trade_contexts[ticket] = ctx
 

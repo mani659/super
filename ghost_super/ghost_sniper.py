@@ -778,6 +778,21 @@ def run_hunter():
                         time.sleep(1)
                         continue
 
+                    # H22 NY_OVERLAP session gate: block all probe arming during NY_OVERLAP
+                    # Evidence: three consecutive weeks avg P&L < -$0.68/tr, n>=10 each week
+                    try:
+                        _current_session = get_session()
+                    except Exception:
+                        _current_session = "UNKNOWN"
+                    if _current_session == "NY_OVERLAP":
+                        logger.info(
+                            f"GHOST_ARM_BLOCKED_SESSION | "
+                            f"session={_current_session} | "
+                            f"price={round(current_price,3)} — probe arming suppressed"
+                        )
+                        time.sleep(1)
+                        continue
+
                     if current_price > recent_high:
                         armed         = "UP_PROBE"
                         probe_extreme = current_price
@@ -869,6 +884,40 @@ def run_hunter():
                             )
 
                     if trigger:
+                        # -- M1 retrace structure at fire (LOGGING ONLY) ------
+                        # Placed BEFORE spread/cap guards so quality is captured
+                        # even on blocked fires.
+                        try:
+                            _retrace_rates = _api().copy_rates_from_pos(
+                                SYMBOL, mt5.TIMEFRAME_M1, 0, 5
+                            )
+                            committed_bars = 0
+                            retrace_body_ratio = 0.0
+                            if _retrace_rates is not None and len(_retrace_rates) >= 2:
+                                for _bar in _retrace_rates[-3:]:
+                                    _bar_bull = _bar["close"] > _bar["open"]
+                                    _bar_range = max(_bar["high"] - _bar["low"], 0.0001)
+                                    _bar_body = abs(_bar["close"] - _bar["open"])
+                                    _body_ratio = _bar_body / _bar_range
+
+                                    if armed == "UP_PROBE" and not _bar_bull and _body_ratio > 0.35:
+                                        committed_bars += 1
+                                    elif armed == "DOWN_PROBE" and _bar_bull and _body_ratio > 0.35:
+                                        committed_bars += 1
+
+                                _last = _retrace_rates[-2]
+                                _last_range = max(_last["high"] - _last["low"], 0.0001)
+                                retrace_body_ratio = abs(_last["close"] - _last["open"]) / _last_range
+
+                            logger.info(
+                                f"GHOST_FIRE_QUALITY | {armed} | "
+                                f"committed_reversal_bars={committed_bars}/3 | "
+                                f"trigger_bar_body_ratio={retrace_body_ratio:.3f} | "
+                                f"atr={round(atr,5)}"
+                            )
+                        except Exception as _gq:
+                            logger.debug(f"Ghost fire quality log error: {_gq}")
+
                         # ── Pre-fire checks ──────────────────────────────
                         if spread > SPREAD_MAX:
                             log_event("SKIP_SPREAD", {

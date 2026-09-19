@@ -133,6 +133,41 @@ class TestCABGatewayPort(unittest.TestCase):
         self.assertEqual(found, [], f"Raw mt5 calls still present: {found}")
         print("T10 PASS  Static check: zero raw mt5 method calls in source")
 
+    # ── T11: H21 M5 context returns safe defaults on error ───────────────────
+    def test_11_h21_m5_context_returns_safe_defaults_on_error(self):
+        """
+        _get_m5_context returns a dict with all four H21 keys when
+        the MT5 data call fails (copy_rates_from_pos returns None).
+        The watcher loop must never be interrupted by an M5 fetch error.
+        """
+        import importlib.util
+        from pathlib import Path
+        import unittest.mock as mock
+
+        # Load cab_watcher module
+        cab_path = Path(__file__).parent / "cab_super" / "cab_watcher.py"
+        spec = importlib.util.spec_from_file_location("cab_watcher_test", cab_path)
+        cw = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cw)
+
+        # Patch _api() to return None for all copy_rates_from_pos calls
+        mock_api = mock.MagicMock()
+        mock_api.copy_rates_from_pos.return_value = None
+
+        with mock.patch.object(cw, "_api", return_value=mock_api):
+            result = cw._get_m5_context("XAUUSDm", is_buy=True)
+
+        # All four fields must be present and safe
+        self.assertIn("m5_close_direction", result)
+        self.assertIn("m5_atr", result)
+        self.assertIn("m5_body_ratio", result)
+        self.assertIn("m5_bars_in_direction", result)
+        self.assertEqual(result["m5_close_direction"], "UNKNOWN")
+        self.assertEqual(result["m5_atr"], 0.0)
+        self.assertEqual(result["m5_body_ratio"], 0.0)
+        self.assertEqual(result["m5_bars_in_direction"], 0)
+        print("T11 PASS  _get_m5_context returns safe defaults on MT5 data failure")
+
 
 if __name__ == "__main__":
     print("=" * 55)
@@ -144,7 +179,7 @@ if __name__ == "__main__":
     result = unittest.TextTestRunner(verbosity=0).run(suite)
     print("=" * 55)
     if result.wasSuccessful():
-        print(f"ALL {result.testsRun}/10 PASS — pu-cab-port complete")
+        print(f"ALL {result.testsRun}/11 PASS — pu-cab-port complete")
     else:
         n = len(result.failures) + len(result.errors)
         print(f"{n} FAILURE(S) — check output above")

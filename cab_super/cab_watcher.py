@@ -207,6 +207,73 @@ def _get_m15_atr(symbol: str = None, period: int = 14) -> float:
     return float(val) if not pd.isna(val) else 1.0
 
 
+def _get_m5_context(symbol: str, is_buy: bool) -> dict:
+    """
+    Fetch M5 context fields for H21 logging at CAB entry detection.
+    Returns dict with all four H21 fields, or safe defaults on any error.
+    Never raises — failure returns neutral values so the watcher loop
+    is never interrupted by a data fetch error.
+    """
+    defaults = {
+        "m5_close_direction": "UNKNOWN",
+        "m5_atr": 0.0,
+        "m5_body_ratio": 0.0,
+        "m5_bars_in_direction": 0,
+    }
+    try:
+        # Last closed M5 bar — fetch 2 bars (index 0 = current open, index 1 = last closed)
+        last_bar = _api().copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 1, 1)
+        if last_bar is None or len(last_bar) == 0:
+            return defaults
+
+        bar = last_bar[0]
+        close_dir = "UP" if bar["close"] > bar["open"] else "DOWN"
+
+        bar_range = max(float(bar["high"]) - float(bar["low"]), 0.0001)
+        body = abs(float(bar["close"]) - float(bar["open"]))
+        body_ratio = round(min(body / bar_range, 1.0), 3)
+
+        # ATR(14) on last 20 M5 bars
+        m5_atr = 0.0
+        rates_20 = _api().copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 20)
+        if rates_20 is not None and len(rates_20) >= 15:
+            import pandas as pd
+            df = pd.DataFrame(rates_20)
+            df["tr"] = pd.concat([
+                df["high"] - df["low"],
+                (df["high"] - df["close"].shift(1)).abs(),
+                (df["low"]  - df["close"].shift(1)).abs(),
+            ], axis=1).max(axis=1)
+            atr_val = df["tr"].rolling(14).mean().iloc[-1]
+            if not pd.isna(atr_val):
+                m5_atr = round(float(atr_val), 5)
+
+        # Consecutive M5 bars in same direction as entry
+        # Fetch 10 bars to count a meaningful streak
+        streak_bars = _api().copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 1, 10)
+        m5_bars_in_dir = 0
+        if streak_bars is not None and len(streak_bars) > 0:
+            # Walk backward from most recent closed bar
+            for bar_s in reversed(streak_bars):
+                bar_bullish = bar_s["close"] > bar_s["open"]
+                if is_buy and bar_bullish:
+                    m5_bars_in_dir += 1
+                elif not is_buy and not bar_bullish:
+                    m5_bars_in_dir += 1
+                else:
+                    break  # streak broken
+
+        return {
+            "m5_close_direction": close_dir,
+            "m5_atr": m5_atr,
+            "m5_body_ratio": body_ratio,
+            "m5_bars_in_direction": m5_bars_in_dir,
+        }
+    except Exception as e:
+        logging.debug(f"_get_m5_context error for {symbol}: {e}")
+        return defaults
+
+
 from core.knowledge_register import KnowledgeRegister
 
 # ==============================================================================
@@ -627,6 +694,18 @@ def manage_fluid_logic():
 
         if pos.ticket not in processed_actions:
             processed_actions[pos.ticket] = set()
+            # H21: log M5 context at first detection of this position
+            _is_buy_for_m5 = (pos.type == 0)
+            m5_ctx = _get_m5_context(pos.symbol, _is_buy_for_m5)
+            logging.info(
+                f"M5_CONTEXT #{pos.ticket} | "
+                f"symbol={pos.symbol} | "
+                f"entry_dir={'BUY' if _is_buy_for_m5 else 'SELL'} | "
+                f"m5_dir={m5_ctx['m5_close_direction']} | "
+                f"m5_atr={m5_ctx['m5_atr']:.5f} | "
+                f"m5_body={m5_ctx['m5_body_ratio']:.3f} | "
+                f"m5_bars_in_dir={m5_ctx['m5_bars_in_direction']}"
+            )
 
         if pos.sl == 0:
             logging.warning(f"  #{pos.ticket} has no SL - skipping")
@@ -660,6 +739,32 @@ def manage_fluid_logic():
             f"Done={done}"
         )
 
+        # -- IMMEDIATE EXIT: trade moving wrong direction in first 2 hours -----
+        # If within first 2 hours of entry AND R < -0.2 AND no actions taken yet:
+        # the entry thesis has not confirmed. Exit before loss compounds.
+        if (
+            not done                          # no actions taken yet (fresh trade)
+            and current_r <= -0.20            # already 0.2R against us
+            and "IMMEDIATE_EXIT" not in done
+        ):
+            # Check time held
+            try:
+                open_time = pos.time          # MT5 position open timestamp (unix)
+                import time as _time
+                time_held_seconds = _time.time() - open_time
+                if time_held_seconds < 7200:  # within first 2 hours
+                    if _close_position(pos, f"IMMEDIATE_EXIT|R{current_r:+.2f}|held_{int(time_held_seconds/60)}min"):
+                        done.add("IMMEDIATE_EXIT")
+                        logging.warning(
+                            f"  * IMMEDIATE_EXIT #{pos.ticket} | "
+                            f"R={current_r:+.2f} | "
+                            f"held={int(time_held_seconds/60)}min | "
+                            f"thesis not confirmed"
+                        )
+                        continue
+            except Exception as _e:
+                logging.debug(f"IMMEDIATE_EXIT check error: {_e}")
+
         # -- EVENT GATE: MACRO LOGIC (OSI & REAPER) ---------------------------
         # These only evaluate on H4 bar close boundaries
         bar_time = intel.get("source_bar_time", 0)
@@ -690,38 +795,53 @@ def manage_fluid_logic():
                             done.add("OSI")
                             continue
 
-            # -- cw-reaper: DUAL-VECTOR REAPER ------------------------------------
+            # -- REAPER: exit losing trade when H4 structure turns against it --
+            # Simplified from 7-condition triple gate to 2 conditions:
+            # (1) R is in loss territory, (2) the last closed H4 bar closed
+            # against our position direction. No regime check — regime label
+            # is unreliable. No degradation check — adds conditions without
+            # adding signal. Bar-gated to prevent thrashing.
             if (
-                regime == "TRENDING"
-                and current_r <= -reaper_r
+                is_new_h4_bar
+                and current_r <= -0.50
                 and "REAPER"    not in done
                 and "PROTECTOR" not in done
+                and "IMMEDIATE_EXIT" not in done
             ):
-                kr = KnowledgeRegister()
-                atr = intel.get("atr_raw", 0.001)
-                degrad = kr.get_micro_degradation(pos.ticket, pos.price_current, atr)
-                is_degrading = (degrad["decay_factor"] > 0.25)
-                asian_suppressed = (
-                    pos.symbol in ("XAUUSDm", "XAUUSD.x") and datetime.utcnow().hour in REAPER_ASIAN_SUPPRESS_HOURS
-                )
+                # Check if last closed H4 bar closed against position direction
+                try:
+                    h4_rates = _api().copy_rates_from_pos(
+                        pos.symbol, mt5.TIMEFRAME_H4, 0, 3
+                    )
+                    if h4_rates is not None and len(h4_rates) >= 2:
+                        last_bar = h4_rates[-2]   # last CLOSED H4 bar
+                        bar_bullish = last_bar["close"] > last_bar["open"]
+                        # For BUY: a bearish H4 bar closing against us triggers REAPER
+                        # For SELL: a bullish H4 bar closing against us triggers REAPER
+                        h4_against = (is_buy and not bar_bullish) or \
+                                     (not is_buy and bar_bullish)
 
-                if is_degrading and not asian_suppressed:
-                    if _close_position(pos, f"REAPER|Macro=TREND_AGAINST|Micro=DEGRADING|{reason[:40]}"):
-                        done.add("REAPER")
-                        logging.warning(
-                            f"  * REAPER FIRED #{pos.ticket} | "
-                            f"R={current_r:+.2f} | Vector=DEGRADING | {reason}"
-                        )
-                        continue
-                else:
-                    suppress_reason = (
-                        "ASIAN_SESSION" if asian_suppressed
-                        else "MICRO_VECTOR_HEALTHY"
-                    )
-                    logging.info(
-                        f"  REAPER BLOCKED #{pos.ticket} | "
-                        f"R={current_r:+.2f} | {suppress_reason}"
-                    )
+                        if h4_against:
+                            if _close_position(
+                                pos,
+                                f"REAPER|H4_AGAINST|R{current_r:+.2f}"
+                            ):
+                                done.add("REAPER")
+                                logging.warning(
+                                    f"  * REAPER FIRED #{pos.ticket} | "
+                                    f"R={current_r:+.2f} | "
+                                    f"H4 closed against position | "
+                                    f"bar_bullish={bar_bullish} is_buy={is_buy}"
+                                )
+                                continue
+                        else:
+                            logging.debug(
+                                f"  REAPER HELD #{pos.ticket} | "
+                                f"R={current_r:+.2f} | "
+                                f"H4 bar direction still WITH position"
+                            )
+                except Exception as _e:
+                    logging.debug(f"REAPER H4 check error: {_e}")
 
         # -- PROTECTOR ---------------------------------------------------------
         if current_r >= protector_r and "PROTECTOR" not in done:
