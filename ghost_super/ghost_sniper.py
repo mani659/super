@@ -103,7 +103,13 @@ SYMBOL             = "XAUUSDm"
 LOT_SIZE           = 0.01
 
 # Load MT5 credentials from local config file (gitignored).
-# Falls back to hardcoded defaults if config.json is missing.
+# fix-secrets (Sep 19 2026): no credential literal lives in this file any more.
+# Resolution order is the MT5_* env vars first, then ghost_super/config.json —
+# env wins so credentials can be injected without editing a file, which is the
+# precedence unified_runner.py already uses for MT5_PASSWORD.
+# The literal that used to sit in the PASSWORD fallback is still recoverable from
+# git history, so it must be rotated at the broker — scrubbing source does not
+# un-publish it.
 _GHOST_CFG = Path(__file__).parent / "config.json"
 if _GHOST_CFG.exists():
     with open(_GHOST_CFG) as _f:
@@ -113,8 +119,8 @@ else:
 
 MT5_PATH           = _cfg.get("mt5_path", r"C:\Program Files\MetaTrader 5 EXNESS - Copy\terminal64.exe")
 ACCOUNT            = _cfg.get("login", 260714012)
-PASSWORD           = _cfg.get("password", "Sal_4659$")
-SERVER             = _cfg.get("server", "Exness-MT5Trial15")
+PASSWORD           = os.environ.get("MT5_PASSWORD") or _cfg.get("password") or ""
+SERVER             = os.environ.get("MT5_SERVER") or _cfg.get("server") or "Exness-MT5Trial15"
 
 MAGIC_SCALP        = 201
 MAGIC_REVERSAL     = 202
@@ -677,6 +683,15 @@ def send_order(order_type, sl, tp, magic, comment,
 #  MAIN HUNTER LOOP
 # ─────────────────────────────────────────────
 def run_hunter():
+    # fix-secrets: fail loudly on a missing credential rather than attempting a
+    # login with an empty password and reporting it as a generic connect failure.
+    if not PASSWORD:
+        logger.error(
+            "No MT5 password available. Put it in ghost_super/config.json "
+            "(gitignored) or export MT5_PASSWORD."
+        )
+        return
+
     if not mt5.initialize(
         path=MT5_PATH, login=ACCOUNT, password=PASSWORD, server=SERVER
     ):

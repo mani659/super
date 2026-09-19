@@ -2048,7 +2048,35 @@ def main():
         print("Gateway init failed")
         return
 
-    login, password, server = 260178085, "Sal_4659$", "Exness-MT5Trial15"
+    # fix-secrets (Sep 19 2026): credentials come from config/config.json
+    # (gitignored) with MT5_* env overrides — the same resolution order
+    # unified_runner.py uses. A password literal used to sit on this line; it is
+    # still recoverable from git history, so rotate it at the broker.
+    import json as _json
+    import os as _os
+    _acct = {}
+    _cfg_path = Path(__file__).parent.parent / "config" / "config.json"
+    try:
+        with open(_cfg_path, encoding="utf-8") as _f:
+            _acct = dict(_json.load(_f).get("accounts", {}).get("demo", {}))
+    except Exception as _e:
+        print(f"Could not read {_cfg_path}: {_e}")
+    for _env, _key in (("MT5_LOGIN", "login"), ("MT5_PASSWORD", "password"),
+                       ("MT5_SERVER", "server"), ("MT5_PATH", "mt5_path")):
+        if _os.environ.get(_env):
+            _acct[_key] = _os.environ[_env]
+
+    login = int(_acct.get("login") or 0)
+    password = _acct.get("password") or ""
+    server = _acct.get("server") or ""
+    if not (login and password and server):
+        print(
+            "Missing MT5 credentials. Set them in config/config.json under "
+            "accounts.demo, or via MT5_LOGIN / MT5_PASSWORD / MT5_SERVER."
+        )
+        gw.shutdown()
+        return
+
     if not gw.login(login, password=password, server=server):
         print("Gateway login failed")
         gw.shutdown()

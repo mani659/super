@@ -1833,7 +1833,9 @@ def main():
         print(f"MT5 init failed: {mt5.last_error()}")
         return
 
-    login, password, server = 260178085, "Sal_4659$", "Exness-MT5Trial15"
+    # fix-secrets: no credential literal. Supply MT5_PASSWORD in the environment.
+    import os as _os
+    login, password, server = 260178085, _os.environ.get("MT5_PASSWORD", ""), "Exness-MT5Trial15"
     if not mt5.login(login, password=password, server=server):
         print(f"Login failed: {mt5.last_error()}")
         mt5.shutdown()

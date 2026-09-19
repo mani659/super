@@ -1374,7 +1374,7 @@ MT5_PATH           = r"C:\Program Files\MetaTrader 5 EXNESS - Copy\terminal64.ex
 LOT_SIZE           = 0.01
 
 ACCOUNT            = 260714012
-PASSWORD           = "Sal_4659$"
+PASSWORD           = "***REDACTED***"
 SERVER             = "Exness-MT5Trial15"
 
 MAGIC_SCALP        = 201

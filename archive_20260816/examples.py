@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION FOR EXNESS
 EXNESS_PATH = r"C:\Program Files\MetaTrader 5 EXNESS\terminal64.exe"
 EXNESS_LOGIN = 260178085
-EXNESS_PASS = "Sal_4659$"
+# fix-secrets: no credential literal. Export MT5_PASSWORD instead.
+EXNESS_PASS = os.environ.get("MT5_PASSWORD", "")
 EXNESS_SERVER = "Exness-MT5Trial15"
 SYMBOL = "EURUSDm"
 
