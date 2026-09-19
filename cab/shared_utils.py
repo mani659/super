@@ -175,6 +175,83 @@ def check_exhaustion_filter(symbol: str, is_buy: bool = True) -> bool:
                 return True
     return False
 
+# ── Hard loss caps (fix-loss-cap) ─────────────────────────────────────────────
+# Sep-12 audit: nothing in this bot bounded the damage a single leg or the book
+# could take. crash.log records a USOILm leg run to -$5,741 on 2026-08-03
+# (Exit: HARD_STOP, MFE +$1,175 — it gave back $6,916 from its best point), plus
+# two further oil legs at -$1,386 and -$1,048, and the strategy files all submit
+# grid orders with sl=0.0, so a basket has no broker-side stop at all.
+# These caps are measured on FLOATING loss at the top of each cycle, which is the
+# failure mode being defended against: one leg running to a catastrophic stop while
+# every other guard stays silent.
+SYMBOL_LOSS_CAP_PCT    = getattr(config, "SYMBOL_LOSS_CAP_PCT", 0.02)    # of starting equity, per symbol
+PORTFOLIO_LOSS_CAP_PCT = getattr(config, "PORTFOLIO_LOSS_CAP_PCT", 0.05)  # of starting equity, all CAB positions
+
+_CAP_START_EQUITY = None
+
+def enforce_loss_caps(magics, logger) -> int:
+    """
+    Flattens CAB positions when floating loss breaches the per-symbol or portfolio
+    cap. Returns the number of positions closed. Never raises.
+
+    Portfolio cap is evaluated first (largest blast radius) and flattens the weakest
+    legs first; the per-symbol cap then covers a single leg bleeding to a full stop.
+    """
+    global _CAP_START_EQUITY
+    try:
+        acct = mt5.account_info()
+        if acct is None or acct.equity <= 0:
+            return 0
+        if _CAP_START_EQUITY is None:
+            _CAP_START_EQUITY = acct.equity
+            logger.info(
+                f"[LOSS CAP] Armed | base equity=${_CAP_START_EQUITY:.2f} | "
+                f"symbol cap={SYMBOL_LOSS_CAP_PCT:.0%} (${_CAP_START_EQUITY * SYMBOL_LOSS_CAP_PCT:.2f}) | "
+                f"portfolio cap={PORTFOLIO_LOSS_CAP_PCT:.0%} (${_CAP_START_EQUITY * PORTFOLIO_LOSS_CAP_PCT:.2f})"
+            )
+
+        positions = mt5.positions_get()
+        if not positions:
+            return 0
+        ours = [p for p in positions if p.magic in magics]
+        if not ours:
+            return 0
+
+        def floating(p):
+            return p.profit + (getattr(p, "swap", 0.0) or 0.0)
+
+        closed = 0
+        port_cap = _CAP_START_EQUITY * PORTFOLIO_LOSS_CAP_PCT
+        total = sum(floating(p) for p in ours)
+        if total <= -port_cap:
+            logger.warning(
+                f"[LOSS CAP] PORTFOLIO floating ${total:.2f} <= -${port_cap:.2f} — "
+                f"flattening all {len(ours)} CAB leg(s), weakest first"
+            )
+            for p in sorted(ours, key=floating):
+                if _close_position(p, "LOSS_CAP_PORTFOLIO", p.magic):
+                    closed += 1
+            return closed
+
+        sym_cap = _CAP_START_EQUITY * SYMBOL_LOSS_CAP_PCT
+        by_sym = {}
+        for p in ours:
+            by_sym.setdefault(p.symbol, []).append(p)
+        for sym, legs in by_sym.items():
+            sym_floating = sum(floating(p) for p in legs)
+            if sym_floating <= -sym_cap:
+                logger.warning(
+                    f"[LOSS CAP] {sym} floating ${sym_floating:.2f} <= -${sym_cap:.2f} — "
+                    f"flattening {len(legs)} leg(s)"
+                )
+                for p in sorted(legs, key=floating):
+                    if _close_position(p, "LOSS_CAP_SYMBOL", p.magic):
+                        closed += 1
+        return closed
+    except Exception as e:
+        logger.error(f"[LOSS CAP] check failed: {e}")
+        return 0
+
 def check_smc_confluence(symbol: str, rates = None) -> str:
     """SMC Confluence check returning FVG_ALIGNED."""
     return "FVG_ALIGNED"
@@ -242,3 +319,60 @@ def get_ema(symbol: str, timeframe: int, period: int = 50) -> float:
     if ema_val is None or (isinstance(ema_val, float) and math.isnan(ema_val)):
         return 0.0
     return float(ema_val)
+
+def snapshot_ltf_context(symbol: str, signal_direction: str) -> dict:
+    """
+    Pure diagnostic snapshot at H4 signal confirmation.
+    Captures M5 microstructure context for post-trade analysis.
+    NO trading logic — read-only telemetry.
+    """
+    result = {
+        'm5_atr': 0.0,
+        'h4_atr': 0.0,
+        'atr_ratio': 0.0,
+        'm5_dist_to_swing_atr': 0.0,
+        'm5_structure': 'UNKNOWN',
+    }
+
+    if not signal_direction:
+        return result
+
+    h4_atr = get_atr(symbol, mt5.TIMEFRAME_H4, 14)
+    result['h4_atr'] = h4_atr
+
+    m5_atr = get_atr(symbol, mt5.TIMEFRAME_M5, 14)
+    result['m5_atr'] = m5_atr
+
+    if h4_atr > 0 and m5_atr > 0:
+        result['atr_ratio'] = round(m5_atr / h4_atr, 4)
+
+    rates_m5 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 50)
+    if rates_m5 is None or len(rates_m5) < 20 or m5_atr <= 0:
+        return result
+
+    swing_high = max(r['high'] for r in rates_m5[-20:])
+    swing_low = min(r['low'] for r in rates_m5[-20:])
+    current_price = float(rates_m5[-1]['close'])
+
+    dist_from_low = (current_price - swing_low) / m5_atr
+    dist_from_high = (swing_high - current_price) / m5_atr
+
+    if current_price >= swing_high:
+        structure = 'AT_OR_ABOVE_HIGH'
+    elif current_price <= swing_low:
+        structure = 'AT_OR_BELOW_LOW'
+    elif dist_from_high < 0.5:
+        structure = 'NEAR_HIGH'
+    elif dist_from_low < 0.5:
+        structure = 'NEAR_LOW'
+    else:
+        structure = 'MID_RANGE'
+
+    result['m5_structure'] = structure
+
+    if signal_direction == 'BULLISH':
+        result['m5_dist_to_swing_atr'] = round(dist_from_low, 2)
+    else:
+        result['m5_dist_to_swing_atr'] = round(dist_from_high, 2)
+
+    return result

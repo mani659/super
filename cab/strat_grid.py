@@ -11,7 +11,9 @@ from shared_utils import (
     check_h4_inversion,
     check_exhaustion_filter,
     check_smc_confluence,
-    _close_position
+    _close_position,
+    snapshot_ltf_context,
+    calculate_dynamic_lot
 )
 
 # Magic Number for Range Extraction Grid (ADX < 30)
@@ -19,22 +21,65 @@ MAGIC_GRID = 9995553
 MAX_GRID_LAYERS = 5 # CAP AT 5 LAYERS
 BASE_GRID_MULTIPLIER = 1.0 # Static base lot
 
+# ── Grid sizing and exposure ceiling (fix-grid-sizing) ────────────────────────
+# The grid's base leg used to be `max(0.01, sym_info.volume_min)` — the broker's
+# minimum tradable lot, with no reference to account size or risk — while the
+# inversion and continuation vectors both sized from RISK_PERCENT. The ladder was
+# anchored the same way, internally re-deriving base_lot from volume_min rather
+# than from the leg the basket actually held, and nothing capped the basket.
+# Sep-12 audit of this bot: -$4,577 over 99 closed trades, of which USOILm -$3,196
+# (two legs of 1.0 lot) and ETHUSDm -$1,305 (a ladder observed out to 1.68 lots,
+# with a 46.63-lot ETH leg in the export). Both legs and the ladder are now
+# risk-derived and the whole basket is bounded.
+RISK_PERCENT = getattr(config, "RISK_PERCENT", 0.01)
+MAX_BASKET_RISK_PCT = 0.03   # hard ceiling on total basket risk, fraction of equity
+
 last_h4_bar = {sym: None for sym in config.SYMBOLS}
 logger = logging.getLogger("STRAT_GRID")
 
-def _calculate_grid_addon_lot(sym_info, layer_index: int) -> float:
+def _grid_risk_per_lot(sym_info, sl_dist_price: float) -> float:
+    """Money risked by 1.0 lot at the grid's notional stop distance. 0.0 if unknown."""
+    try:
+        if sl_dist_price <= 0 or sym_info.point <= 0:
+            return 0.0
+        point_value = sym_info.trade_tick_value / (sym_info.trade_tick_size / sym_info.point)
+        return (sl_dist_price / sym_info.point) * point_value
+    except Exception:
+        return 0.0
+
+def _projected_basket_risk(sym_info, sl_dist_price: float,
+                           basket_volume: float, extra_volume: float):
+    """Total money risk of (existing basket + proposed leg). None when unknowable."""
+    per_lot = _grid_risk_per_lot(sym_info, sl_dist_price)
+    if per_lot <= 0:
+        return None
+    return per_lot * (basket_volume + extra_volume)
+
+def _risk_cap_amount():
+    """Absolute money ceiling on total grid-basket risk. None when equity is unreadable."""
+    acct = mt5.account_info()
+    if acct is None or acct.equity <= 0:
+        return None
+    return acct.equity * MAX_BASKET_RISK_PCT
+
+def _calculate_grid_addon_lot(sym_info, layer_index: int, base_lot: float) -> float:
     """
     Behavioral Scaling: Layers 1-2 (Feeler) = 1.0x, Layers 3-5 (Commitment) = 1.5x, 2.0x, 2.5x
+
+    fix-grid-sizing: `base_lot` is now passed in as the risk-derived unit for this
+    symbol (see RISK_PERCENT above). It used to be re-derived internally as
+    max(0.01, volume_min), so the ladder was anchored to the broker minimum rather
+    than to the leg the basket actually holds.
     """
-    base_lot = max(0.01, sym_info.volume_min)
+    unit = max(float(base_lot), sym_info.volume_min)
     if layer_index <= 2:
-        raw_lot = base_lot * 1.0
+        raw_lot = unit * 1.0
     elif layer_index == 3:
-        raw_lot = base_lot * 1.5
+        raw_lot = unit * 1.5
     elif layer_index == 4:
-        raw_lot = base_lot * 2.0
+        raw_lot = unit * 2.0
     else:
-        raw_lot = base_lot * 2.5
+        raw_lot = unit * 2.5
         
     step = sym_info.volume_step if sym_info.volume_step > 0 else 0.01
     lot_size = round(raw_lot / step) * step
@@ -169,7 +214,26 @@ def execute_grid_entries():
             if not signal:
                 continue
 
-            base_lot = max(0.01, sym_info.volume_min)
+            # fix-grid-sizing: the base leg is risk-derived, and refused outright if
+            # its projected risk alone would breach the basket ceiling.
+            sl_dist_notional = h4_atr * config.ATR_MULT_SL
+            base_lot = calculate_dynamic_lot(sym, sl_dist_notional, RISK_PERCENT)
+            if base_lot is None or base_lot <= 0:
+                logger.warning(f"[{sym}] Grid base skipped — lot sizing returned {base_lot}")
+                continue
+
+            _projected = _projected_basket_risk(sym_info, sl_dist_notional, 0.0, base_lot)
+            _cap = _risk_cap_amount()
+            if _projected is None or _cap is None or _projected > _cap:
+                logger.warning(
+                    f"[{sym}] Grid base BLOCKED — projected risk "
+                    f"{'?' if _projected is None else f'${_projected:.2f}'} > cap "
+                    f"{'?' if _cap is None else f'${_cap:.2f}'} "
+                    f"({MAX_BASKET_RISK_PCT:.0%} of equity)"
+                )
+                last_h4_bar[sym] = current_h4_time
+                continue
+
             if signal == "BULLISH":
                 entry_price = tick.ask
                 order_type, comment = mt5.ORDER_TYPE_BUY, "GRID_BASE"
@@ -224,6 +288,7 @@ def execute_grid_entries():
                 else:
                     sess = "LATE_NY"
 
+                ltf = snapshot_ltf_context(sym, signal)
                 register_trade_context(
                     ticket=res.order,
                     risk_amount=risk_amount,
@@ -237,7 +302,8 @@ def execute_grid_entries():
                     minus_di=0.0,
                     ema50=0.0,
                     session=sess,
-                    subtype=comment
+                    subtype=comment,
+                    **ltf
                 )
                 logger.info(f"[GRID BASE ENTRY] Executed {sym} | Lot: {base_lot} | Type: {comment} | ADX: {adx:.1f}")
             else:
@@ -265,7 +331,28 @@ def execute_grid_entries():
             required_spacing = h4_atr * (1.0 + (current_layer - 1) * 0.5)
             
             if adverse_move >= required_spacing and current_layer < MAX_GRID_LAYERS:
-                next_lot = _calculate_grid_addon_lot(sym_info, current_layer + 1)
+                # fix-grid-sizing: ladder anchored to the risk-derived unit, and the
+                # basket as a whole may not exceed MAX_BASKET_RISK_PCT of equity.
+                # Before this, `next_lot` came from a ladder anchored to the broker
+                # minimum with no ceiling on the basket at all.
+                sl_dist_notional = h4_atr * config.ATR_MULT_SL
+                base_unit_lot = calculate_dynamic_lot(sym, sl_dist_notional, RISK_PERCENT)
+                next_lot = _calculate_grid_addon_lot(sym_info, current_layer + 1, base_unit_lot)
+
+                _basket_vol = sum(p.volume for p in basket)
+                _projected = _projected_basket_risk(sym_info, sl_dist_notional, _basket_vol, next_lot)
+                _cap = _risk_cap_amount()
+                if _projected is None or _cap is None or _projected > _cap:
+                    logger.warning(
+                        f"[{sym}] GRID ADDON BLOCKED at layer {current_layer + 1} — "
+                        f"projected basket risk "
+                        f"{'?' if _projected is None else f'${_projected:.2f}'} > cap "
+                        f"{'?' if _cap is None else f'${_cap:.2f}'} "
+                        f"({MAX_BASKET_RISK_PCT:.0%} of equity). "
+                        f"Basket held at {_basket_vol:.2f} lots."
+                    )
+                    continue
+
                 order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
                 comment = "GRID_ADDON"
 
@@ -313,6 +400,7 @@ def execute_grid_entries():
                     else:
                         sess = "LATE_NY"
 
+                    ltf = snapshot_ltf_context(sym, "BULLISH" if is_buy else "BEARISH")
                     register_trade_context(
                         ticket=res.order,
                         risk_amount=risk_amount,
@@ -326,7 +414,8 @@ def execute_grid_entries():
                         minus_di=0.0,
                         ema50=0.0,
                         session=sess,
-                        subtype=comment
+                        subtype=comment,
+                        **ltf
                     )
                     logger.info(f"[GRID ADDON ENTRY] Layer {current_layer+1} on {sym} | Lot: {next_lot} | Step: {adverse_move:.5f} (>= {required_spacing:.5f} ATR)")
                 else:

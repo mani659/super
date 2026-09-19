@@ -1,8 +1,8 @@
 # Session Handoff Document: CAB Standalone (Single Pair)
 
-**Date of Handoff:** August 30, 2026
+**Date of Handoff:** September 19, 2026
 **Target Audience:** Incoming AI Models / Developers
-**Current Phase:** Observation Window (Week 3+) — Pure Data Collection, Enhanced Telemetry Active
+**Current Phase:** Post-gate measurement continuing; first segment Sep 13–19 net positive (~+$1.4k), Grid-led
 
 ---
 
@@ -12,29 +12,36 @@ The `cab` repository contains a standalone, fully decoupled Inversion and Grid e
 **Current Architecture:**
 The bot utilizes a 3-tier ADX dynamic risk system to navigate different market regimes:
 - **ADX < 30:** Grid execution logic with strict Min Lot sizing (0.01).
-- **ADX 30-60:** Continuation strategy (Dynamic Lot sizing, 1% risk).
+- **ADX 30-60:** Continuation strategy (Dynamic Lot sizing, 1% risk) — **DISABLED** (post-gate plan 13 Sep 2026).
 - **ADX > 60:** Volatility strategy (Dynamic Lot sizing, 1% risk).
 
 ## 2. Current State & Recent Accomplishments
-During Week 2, a significant statistical anomaly was uncovered: Long positions generated a massive edge (64.5% win rate), while Short positions severely underperformed (33.3% win rate) because they were executed during macro bullish trends on Gold and Oil without directional bias gates. 
+Post-gate measurement segment 1 (Sep 13–19) produced a net positive week (~+$1,415) driven almost entirely by Grid ADDON legs. Inversion contributed –$134 on 3 EURUSDm trades (all H1_STRUCT_INVALID exits). Continuation entries remained OFF as designed.
 
-To resolve this, the following architectural updates were applied:
+Key findings from segment 1:
+- Grid ADDON legs (n=4, +$1,432) dominated Grid BASE legs (n=12, +$118).
+- Single USDJPY ADX-kill drove –$1,007, confirming grid path risk remains structural.
+- No loss caps breached; all management operational.
 
-1. **H4 Macro Trend Filter:** Added vectorized `get_h4_macro_trend()` in `cab/shared_utils.py` and implemented it in `cab/strat_inversion.py`. Inversion sequences (F9/F10) are now completely blocked from firing against the prevailing 50-EMA H4 trend.
-2. **Behavioral Pacing (Grid Spacing):** Added geometric expansion to `cab/strat_grid.py`. Subsequent grid levels now dynamically expand their spacing based on an exponent of the level depth.
-3. **The 30-60 ADX Bracket (Untouched):** `cab/strat_continuation.py` generated $2,037.86 net profit in Week 1. This file has been **strictly locked and left untouched** to continue validating its edge in W2/W3.
+See `docs/week_postgate_Sep13_19_summary.md` for full segment 1 analysis.
 
 ## 3. Active Directives (Do Not Violate)
 - **Bot Boundaries Mandate:** Do **NOT** apply V1's `max_lot_demo_cap` or global multi-bot constraints to this bot. It runs a standalone mathematical strategy with its own dynamic balance rules.
 - **The Incubation Mandate (ADR-003):** You are strictly prohibited from tweaking code parameters to fit short-term (1-week) variance. We require multiple weeks of uninterrupted telemetry before altering core math. 
+- **Post-Gate (active):** Continuation entries DISABLED (magic 9995552). No new Cont entries. Inversion + Grid live and unchanged. See `docs/post_gate_plan.md` for the formal plan.
 
 ## 4. Current Directives
-- **Observation Window (active):** No code changes, no parameter changes, no new filters. See `docs/observation_window_plan.md` for the formal measurement plan.
+- **Post-Gate (active):** Continuation entries DISABLED (magic 9995552). No new Cont entries. Inversion + Grid live and unchanged. See `docs/post_gate_plan.md` for the formal plan.
 - **Enhanced Telemetry (v2.1.1 deployed Aug 30):** Trade context now captures ADX, +DI, -DI, H4 EMA, session, and subtype at entry. Grid entries now have notional risk for R-multiple calculation. Harvest log enriched. Zero trading logic changes.
-- **Decision Gate:** At end of observation window (~Sep 12), evaluate whether Continuation winners justify Inversion + Grid drag.
+- **M5 LTF Snapshot Telemetry (v2.1.2 deployed Sep 5):** Diagnostic-only. `snapshot_ltf_context()` captures M5 ATR, ATR ratio, swing distance, and structure label at entry. Fields stored in `trade_context.json`. Harvest log includes ATR_Ratio and M5_Struct. Zero trading logic changes.
+- **Next measurement window:** 2 calendar weeks from Sep 13 OR 30 closed Inv+Grid trades (whichever later). End-window decision: net≥0 continue; net<0 but controlled → new plan; DD breach → pause.
+- **Segment 1 result:** Net +$1,415 (22 closes, 16W/6L). Grid-led. Formal sample still incomplete.
 
 ## 5. Immediate Next Steps for Incoming Model
-- Verify the bot is running and heartbeat is active on the standalone terminal.
-- Confirm `trade_context.json` is being written with the new v2.1.1 fields (adx, plus_di, minus_di, ema50, session, subtype) on the next closed trade.
+- Verify `ENABLE_CONTINUATION=False` on startup log — confirm no new 9995552 entries are being opened.
+- Confirm Inversion (9995551) and Grid (9995553) are still firing and managing normally.
+- Confirm loss caps, Protector, Reaper, Harvester are all operational on existing positions.
 - Do NOT introduce arbitrary filters, parameter changes, or strategy modifications.
-- Log weekly observations in `docs/week2_performance_summary.md` (template) at end of each trading week.
+- Track metrics per `docs/post_gate_plan.md` end-window decision table.
+- Reference `docs/week_postgate_Sep13_19_summary.md` for segment 1 findings.
+- Reference `docs/next_week_plan_standalone.md` for week ahead plan.

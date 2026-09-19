@@ -13,7 +13,8 @@ from shared_utils import (
     check_h4_inversion,
     check_exhaustion_filter,
     check_smc_confluence,
-    _close_position
+    _close_position,
+    snapshot_ltf_context
 )
 
 # Magic Number hardcoded for the Continuation Vector (ADX 30 to 60)
@@ -45,12 +46,37 @@ def manage_continuation_positions():
         
         orders = mt5.history_orders_get(position=pos.ticket)
         if not orders:
-            continue
-        entry_order = next((o for o in orders if o.type in (mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL)), None)
-        if not entry_order or entry_order.sl == 0:
-            continue
-        
-        initial_risk_price = abs(pos.price_open - entry_order.sl)
+            logger.warning(f"[SKIP] #{pos.ticket} [{pos.symbol}] No history orders found — cannot determine initial SL. Managing with pos.sl fallback.")
+            # Fallback: use position's current SL directly (for pending orders that filled)
+            if pos.sl == 0:
+                logger.warning(f"[SKIP] #{pos.ticket} [{pos.symbol}] No SL on position either — cannot manage R. Skipping.")
+                continue
+            initial_risk_price = abs(pos.price_open - pos.sl)
+            entry_order = None  # signal that we used fallback
+        else:
+            # FIX: include pending order types (BUY_STOP/SELL_STOP/BUY_LIMIT/SELL_LIMIT)
+            # so filled pending orders (e.g. CONT_TRAP_SELL) are not silently skipped
+            ENTRY_TYPES = (
+                mt5.ORDER_TYPE_BUY, mt5.ORDER_TYPE_SELL,
+                mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_SELL_LIMIT,
+                mt5.ORDER_TYPE_BUY_STOP, mt5.ORDER_TYPE_SELL_STOP,
+            )
+            entry_order = next((o for o in orders if o.type in ENTRY_TYPES), None)
+            if not entry_order:
+                logger.warning(f"[SKIP] #{pos.ticket} [{pos.symbol}] No matching entry order in history (types={[o.type for o in orders]}) — using pos.sl fallback.")
+                if pos.sl == 0:
+                    logger.warning(f"[SKIP] #{pos.ticket} [{pos.symbol}] No SL on position either — cannot manage R. Skipping.")
+                    continue
+                initial_risk_price = abs(pos.price_open - pos.sl)
+            elif entry_order.sl == 0:
+                # Pending orders may have sl=0 at order level; the SL is on the position
+                logger.info(f"[MANAGE] #{pos.ticket} [{pos.symbol}] Entry order SL=0 (likely pending order) — using pos.sl={pos.sl}")
+                if pos.sl == 0:
+                    logger.warning(f"[SKIP] #{pos.ticket} [{pos.symbol}] No SL on position either — cannot manage R. Skipping.")
+                    continue
+                initial_risk_price = abs(pos.price_open - pos.sl)
+            else:
+                initial_risk_price = abs(pos.price_open - entry_order.sl)
         if initial_risk_price <= 0:
             continue
         
@@ -73,17 +99,26 @@ def manage_continuation_positions():
         be_plus_buffer = pos.price_open + buffer_price if is_buy else pos.price_open - buffer_price
         
         # 1. REAPER (-0.5R Bailout on H1 Momentum)
+        # fix-reaper-scale: the gate used to require h1_body > m15_atr — an H1 candle
+        # body measured against an M15 ATR. An H1 body is typically ~2x an M15 ATR, so
+        # requiring it to EXCEED the M15 ATR on the single last-closed H1 bar made the
+        # gate nearly unreachable: over W4-W8 this bot logged 2 REAPER_FLIP kills
+        # against 54 HARD_STOP exits (Sep-12 audit) — the bailout effectively never
+        # ran. The comparison is now against the H1 ATR.
         if current_r <= -0.5:
             rates_h1 = mt5.copy_rates_from_pos(pos.symbol, mt5.TIMEFRAME_H1, 0, 2)
             if rates_h1 is not None and len(rates_h1) > 1:
                 cur_h1 = rates_h1[-2]
                 h1_body = abs(cur_h1['close'] - cur_h1['open'])
-                if is_buy and cur_h1['close'] < cur_h1['open'] and h1_body > m15_atr:
-                    if _close_position(pos, "REAPER_FLIP", MAGIC_CONTINUATION):
-                        log_structural_flip(pos.ticket, reason="REAPER_FLIP")
-                        logger.warning(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] REAPER killed trade early (-0.5R).")
-                    continue
-                elif not is_buy and cur_h1['close'] > cur_h1['open'] and h1_body > m15_atr:
+                h1_atr_raw = get_atr(pos.symbol, mt5.TIMEFRAME_H1, 14)
+                if h1_atr_raw and not math.isnan(h1_atr_raw) and h1_atr_raw > 0:
+                    h1_atr = h1_atr_raw
+                else:
+                    h1_atr = m15_atr * 2.0   # fallback: ~1 H1 body expressed in ATR
+                h1_reversal_body = h1_atr * getattr(config, "REAPER_BODY_ATR_FRACTION", 0.5)
+                h1_against = ((is_buy and cur_h1['close'] < cur_h1['open'])
+                              or (not is_buy and cur_h1['close'] > cur_h1['open']))
+                if h1_against and h1_body > h1_reversal_body:
                     if _close_position(pos, "REAPER_FLIP", MAGIC_CONTINUATION):
                         log_structural_flip(pos.ticket, reason="REAPER_FLIP")
                         logger.warning(f"[MANAGEMENT] #{pos.ticket} [{pos.symbol}] REAPER killed trade early (-0.5R).")
@@ -354,6 +389,7 @@ def execute_continuation_entries():
             else:
                 sess = "LATE_NY"
 
+            ltf = snapshot_ltf_context(sym, signal)
             register_trade_context(
                 ticket=res.order,
                 risk_amount=risk_amount,
@@ -367,7 +403,8 @@ def execute_continuation_entries():
                 minus_di=minus_di,
                 ema50=0.0,
                 session=sess,
-                subtype=comment
+                subtype=comment,
+                **ltf
             )
             
             logger.info(f"[CONTINUATION ENTRY] Executed {sym} | ADX: {adx:.1f} (+DI={plus_di:.1f}, -DI={minus_di:.1f}) | Lot: {calc_volume} | Trigger: {comment}")
