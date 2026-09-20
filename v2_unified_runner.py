@@ -211,8 +211,13 @@ def main():
 
     # The V2 account is pinned HERE rather than only in config.json because
     # config/config.json is gitignored (line 78), so it is a local-only file that
-    # can be lost or recreated without the pin. accounts.v2_demo overrides these
-    # defaults when present; the env vars below override both.
+    # can be lost or recreated without the pin. Resolution order (first hit wins):
+    #   1. env vars (MT5_PASSWORD_V2 / MT5_SERVER_V2 / MT5_PATH_V2)
+    #   2. secrets.json -> accounts.v2_demo   (gitignored central credentials file)
+    #   3. config.json  -> accounts.v2_demo   (gitignored per-tree config)
+    #   4. V2_ACCOUNT_DEFAULT below
+    # secrets.json keeps ALL bot credentials in one gitignored file so a fresh
+    # clone only needs one file restored, not one per bot.
     V2_ACCOUNT_DEFAULT = {
         "login": 474228887,                 # NOT accounts.demo's 474167713
         "server": "Exness-MT5Trial15",
@@ -220,6 +225,22 @@ def main():
         "mt5_path": None,
     }
     account_cfg = dict(V2_ACCOUNT_DEFAULT)
+    secrets_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "secrets.json"
+    )
+    try:
+        with open(secrets_path, "r", encoding="utf-8") as sf:
+            _sec = json.load(sf).get("accounts", {}).get("v2_demo", {})
+            if _sec.get("password") and _sec["password"] != "PLACEHOLDER":
+                account_cfg["password"] = _sec["password"]
+            if _sec.get("server"):
+                account_cfg["server"] = _sec["server"]
+            if _sec.get("mt5_path") and account_cfg.get("mt5_path") is None:
+                account_cfg["mt5_path"] = _sec["mt5_path"]
+    except FileNotFoundError:
+        logger.warning("secrets.json not found — falling back to config.json/env")
+    except Exception as e:
+        logger.warning(f"secrets.json unreadable ({e}) — falling back")
     account_cfg.update(config_data.get("accounts", {}).get("v2_demo", {}))
     # Env overrides mirror V1's MT5_PASSWORD / MT5_SERVER / MT5_PATH handling.
     for _env, _key in (("MT5_PASSWORD_V2", "password"),
@@ -309,7 +330,7 @@ def main():
             cab_cfg = CABConfig(
                 symbol=sym,
                 risk_percent=cab_cfg_dict.get("cab_risk_percent", 0.5),
-                atr_multiplier=cab_cfg_dict.get("cab_atr_multiplier", 3.0),
+                atr_multiplier=cab_cfg_dict.get("cab_atr_multiplier", 2.5),  # fix-parity-atr-mult: V1 uses 2.5 (cab_super/cab_entry.py:81)
                 max_spread_points=cab_cfg_dict.get("cab_max_spread", 400),
                 max_lot_demo_cap=config_data.get("global_settings", {}).get("cab_max_lot_demo_cap", 0.01)
             )

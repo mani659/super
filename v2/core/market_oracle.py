@@ -100,17 +100,17 @@ class MarketOracle:
         current_spread = float(tick.ask - tick.bid) if tick else 0.0
         normal_spread = 2.0
         
+        # Session hours aligned to ghost_sniper.get_session() (canonical).
+        # F-A3 fix: standardised Sep 2026 — single taxonomy across all bots.
         current_hour = pd.Timestamp.now(tz='UTC').hour
-        if current_hour in (0, 1, 2, 3, 4, 5, 6):
-            session = "ASIAN"
-        elif current_hour in (7, 8, 9, 10, 11, 12):
+        if 8 <= current_hour < 12:
             session = "LONDON"
-        elif current_hour in (13, 14, 15, 16):
+        elif 12 <= current_hour < 16:
             session = "NY_OVERLAP"
-        elif current_hour in (17, 18, 19, 20):
+        elif 16 <= current_hour < 21:
             session = "NY_CLOSE"
         else:
-            session = "OFF_HOURS"
+            session = "ASIAN"
             
         if timeframe == mt5.TIMEFRAME_H4: tf_str = "H4"
         elif timeframe == mt5.TIMEFRAME_M30: tf_str = "M30"

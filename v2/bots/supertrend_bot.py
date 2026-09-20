@@ -303,14 +303,19 @@ class SuperTrendBot:
     # SESSION GATE  (V1 parity: ASIAN blocks gated FX pairs only)
     # ==========================================================================
     def _get_session(self) -> str:
+        """
+        Session classification aligned to ghost_sniper.get_session()
+        (canonical definition). F-A3 fix Sep 2026 — same fix applied to
+        V1 core/supertrend_bot.py.
+        """
         hour = datetime.utcnow().hour
-        if hour < 7:
-            return "ASIAN"
-        if hour < 12:
+        if 8 <= hour < 12:
             return "LONDON"
-        if hour < 17:
+        if 12 <= hour < 16:
             return "NY_OVERLAP"
-        return "OTHER"
+        if 16 <= hour < 21:
+            return "NY_CLOSE"
+        return "ASIAN"
 
     def _is_session_allowed(self) -> bool:
         if not self.config.session_gate_enabled:

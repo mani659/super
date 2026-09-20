@@ -181,7 +181,15 @@ class CABBot:
         if not snapshot:
             return False
             
-        atr = snapshot.atr_raw if snapshot.atr_raw > 0 else 1.0
+        # fix-atr-fail-closed: mirrors cab_super/cab_entry.py — an unusable ATR
+        # must block the entry, not fall back to 1.0 (≈8x oversizing on XAUUSDm).
+        atr = snapshot.atr_raw
+        if atr is None or atr <= 0:
+            logger.warning(
+                f"{self.config.symbol}: H4 ATR unavailable (KR snapshot invalid) "
+                f"— entry blocked this cycle"
+            )
+            return False
 
         # Auto-Reversal Logic
         all_pos = self.gateway.positions_get(symbol=self.config.symbol)

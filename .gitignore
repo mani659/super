@@ -77,3 +77,4 @@ logs/cab_state_*.json
 # Security
 config/config.json
 ghost_super/config.json
+secrets.json
