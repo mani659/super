@@ -9,6 +9,7 @@
 
 - **ZERO trading-logic changes**
 - **Cont entries stay OFF** (`ENABLE_CONTINUATION=False`)
+- Audit 20 Sep: no code this week; B8 grid path risk remains known and under measurement.
 
 ## Book
 

@@ -24,6 +24,7 @@ See `docs/week_Sep13_19_summary.md` for full week analysis.
 - **Demo Experiment Lock:** No entry signal changes, no ADX/session hard filters, no PARTIAL_R execution, no pair removals during the experiment week. Observation-layer logging only.
 - **Data over Speculation:** Do not attempt to tweak logic, SL distances, or logic filters based on short-term winning or losing streaks. Any future trade filters must be translated directly from data science reviews, not speculative hypotheses.
 - **LTF Research Lock:** No entry filters from LTF flags until Phase 3 threshold met (≥80 closes or 4 weeks from 13 Sep). LiqSweptPrior treated as broken until diagnostic fix.
+- **Independent audit 20 Sep 2026 reviewed.** No code this week. See `docs/audit_response_Sep20.md`.
 
 ## 4. Current Configuration Summary
 

@@ -29,6 +29,7 @@ See `docs/week_postgate_Sep13_19_summary.md` for full segment 1 analysis.
 - **Bot Boundaries Mandate:** Do **NOT** apply V1's `max_lot_demo_cap` or global multi-bot constraints to this bot. It runs a standalone mathematical strategy with its own dynamic balance rules.
 - **The Incubation Mandate (ADR-003):** You are strictly prohibited from tweaking code parameters to fit short-term (1-week) variance. We require multiple weeks of uninterrupted telemetry before altering core math. 
 - **Post-Gate (active):** Continuation entries DISABLED (magic 9995552). No new Cont entries. Inversion + Grid live and unchanged. See `docs/post_gate_plan.md` for the formal plan.
+- **Independent audit 20 Sep 2026 reviewed.** Trading logic unchanged for measurement window. See `docs/audit_response_Sep20.md`.
 
 ## 4. Current Directives
 - **Post-Gate (active):** Continuation entries DISABLED (magic 9995552). No new Cont entries. Inversion + Grid live and unchanged. See `docs/post_gate_plan.md` for the formal plan.

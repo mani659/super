@@ -10,6 +10,7 @@
 - **ZERO entry-logic changes**
 - **ZERO new live filters from LTF flags**
 - No ZR, no signal flip, no ATR-breakout live
+- Audit 20 Sep: no code this week; C1 restart R-quality and C3/C4 clocks noted as deferred risks.
 
 ## Keep
 
