@@ -587,21 +587,17 @@ class SuperTrendBot:
     # ==========================================================================
     def _get_session(self) -> str:
         """
-        Classify current UTC hour into trading session.
-
-        ASIAN      : 00:00 ??? 06:59 UTC (Tokyo / Sydney)
-        LONDON     : 07:00 ??? 11:59 UTC
-        NY_OVERLAP : 12:00 ??? 16:59 UTC (London / NY overlap ??? highest volume)
-        OTHER      : 17:00 ??? 23:59 UTC (NY solo / pre-Asia)
+        Session classification aligned to ghost_sniper.get_session()
+        (canonical definition). F-A3 fix Sep 2026.
         """
         hour = datetime.utcnow().hour
-        if hour < 7:
-            return "ASIAN"
-        if hour < 12:
+        if 8 <= hour < 12:
             return "LONDON"
-        if hour < 17:
+        if 12 <= hour < 16:
             return "NY_OVERLAP"
-        return "OTHER"
+        if 16 <= hour < 21:
+            return "NY_CLOSE"
+        return "ASIAN"
 
     def _is_session_allowed(self) -> bool:
         """

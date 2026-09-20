@@ -108,18 +108,17 @@ class MarketPulseEngine:
         current_spread = float(tick.ask - tick.bid) if tick else 0.0
         normal_spread = 2.0  # Placeholder, should ideally track rolling spread
         
-        # Simple session logic (UTC)
+        # Session hours aligned to ghost_sniper.get_session() (canonical).
+        # F-A3 fix: standardised Sep 2026 — single taxonomy across all bots.
         current_hour = pd.Timestamp.now(tz='UTC').hour
-        if current_hour in (0, 1, 2, 3, 4, 5, 6):
-            session = SessionTag.ASIAN
-        elif current_hour in (7, 8, 9, 10, 11, 12):
+        if 8 <= current_hour < 12:
             session = SessionTag.LONDON
-        elif current_hour in (13, 14, 15, 16):
+        elif 12 <= current_hour < 16:
             session = SessionTag.NY_OVERLAP
-        elif current_hour in (17, 18, 19, 20):
+        elif 16 <= current_hour < 21:
             session = SessionTag.NY_CLOSE
         else:
-            session = SessionTag.OFF_HOURS
+            session = SessionTag.ASIAN
             
         tf_str = "H4" if timeframe == mt5.TIMEFRAME_H4 else "M15"
             

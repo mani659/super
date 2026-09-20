@@ -254,17 +254,18 @@ class CABEntryEngine:
         df["time"] = pd.to_datetime(df["time"], unit="s")
         return df
 
-    def _get_h4_atr(self) -> float:
+    def _get_h4_atr(self) -> Optional[float]:
         """
         Consumes canonical H4 ATR from Knowledge Register.
-        Returns 1.0 as safe fallback.
+        Returns None if snapshot is unavailable — callers must
+        treat None as an entry block, not a fallback value.
         """
         from core.knowledge_register import KnowledgeRegister
         kr = KnowledgeRegister()
         snapshot = kr.get_market_state(self.config.symbol, "H4")
-        if snapshot:
+        if snapshot and snapshot.atr_raw > 0:
             return snapshot.atr_raw
-        return 1.0
+        return None
 
     # ── Guards ────────────────────────────────────────────────────────────────
     def _spread_ok(self) -> bool:
@@ -531,7 +532,13 @@ class CABEntryEngine:
             return False
 
         # ── ATR and lot ───────────────────────────────────────────────────────
-        atr     = self._get_h4_atr()
+        atr = self._get_h4_atr()
+        if atr is None:
+            self.logger.warning(
+                f"{self.config.symbol}: H4 ATR unavailable (KR snapshot missing) "
+                f"— entry blocked this cycle"
+            )
+            return False
         sl_dist = atr * self.config.atr_multiplier
         lot     = self._calculate_lot(sl_dist)
 
